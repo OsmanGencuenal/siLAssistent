@@ -22,12 +22,22 @@ class Runtime:
         return root
 
     @classmethod
+    def log_root(cls,local_app_data=None):
+        base=(Path(local_app_data)/"siLAssistent") if local_app_data else cls.data_root()
+        root=base/"Logs"
+        root.mkdir(parents=True,exist_ok=True)
+        return root
+
+    @classmethod
     def configure_logging(cls):
         logger = logging.getLogger("siLAssistent")
         if not logger.handlers:
-            handler = RotatingFileHandler(cls.data_root() / "siLAssistent.log", maxBytes=2_000_000,
+            handler = RotatingFileHandler(cls.log_root() / "siLAssistent.log", maxBytes=2_000_000,
                                           backupCount=3, encoding="utf-8")
             handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
             logger.addHandler(handler)
             logger.setLevel(logging.INFO)
+            logger.propagate=False
+            logging.getLogger().addHandler(handler)
+            if logging.getLogger().level>logging.INFO:logging.getLogger().setLevel(logging.INFO)
         return logger

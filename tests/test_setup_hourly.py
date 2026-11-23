@@ -11,7 +11,7 @@ class SetupHourlyTests(unittest.TestCase):
         timer=Mock()
         with patch("shiboken6.isValid",return_value=True),patch.object(SetupUpdates,"_automatic_check",False,create=True),patch.object(SetupUpdates,"_hourly_context",(parent,"git"),create=True),patch.object(SetupUpdates,"_hourly_timer",timer,create=True),patch.object(SetupUpdates,"_hourly_checked",{},create=True),patch.object(SetupUpdates,"_active",False,create=True),patch.object(Config,"state",return_value={"GitLocalRepoPath":"repo"}),patch.object(SetupUpdates,"start") as start:
             SetupUpdates.hourly_tick(datetime(2026,11,11,12,15))
-            start.assert_called_once_with(parent,"git",offer=False)
+            start.assert_called_once_with(parent,"git",offer=True)
             timer.start.assert_called_with(45*60*1000)
             SetupUpdates.hourly_tick(datetime(2026,11,11,12,50))
             assert start.call_count==1

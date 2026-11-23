@@ -34,7 +34,9 @@ class BuildContractTests(unittest.TestCase):
     def test_release_uses_complete_suite_and_only_runtime_icons(cls):
         root=Path(__file__).resolve().parents[1]
         build=(root/"tools/build_siLAssistent.ps1").read_text(encoding="utf-8")
-        assert "-m pytest tests -q" in build
+        assert 'tools\\run_tests.py' in build
+        runner=(root/"tools/run_tests.py").read_text(encoding="utf-8")
+        assert '"-vv"' in runner and "idle_timeout=180" in runner
         assert "--nofollow-import-to=pytest" in build
         assert "--include-data-dir=$Root\\icons=icons" not in build
         assert "check_distribution.py" in build
@@ -81,7 +83,7 @@ class BuildContractTests(unittest.TestCase):
         installer=(root/"_iss/siLAssistent.iss").read_text(encoding="utf-8")
         batch=(root/"build_siLAssistent.bat").read_text(encoding="utf-8")
         assert "DisableDirPage=no" in installer
-        assert "BUILD ABGESCHLOSSEN" in batch and "BUILD FEHLGESCHLAGEN" in batch
+        assert "### BUILD ERFOLGREICH ABGESCHLOSSEN ###" in batch and "### BUILD FEHLGESCHLAGEN ###" in batch
         assert "pause" in batch and "exit /b %BuildResult%" in batch
 
     @classmethod
@@ -110,3 +112,22 @@ class BuildContractTests(unittest.TestCase):
         assert 'Name: "{app}\\siLAssistent.ini.lock"' in cleanup
         assert 'Type: dirifempty; Name: "{app}"' in cleanup
         assert "filesandordirs" not in cleanup
+
+    @classmethod
+    def test_standalone_gate_requires_isolated_uia_worker(cls):
+        root=Path(__file__).resolve().parents[1]
+        gate=(root/"tools/test_standalone.ps1").read_text(encoding="utf-8")
+        smoke=(root/"source/core/smoke.py").read_text(encoding="utf-8")
+        assert '"silver_ui_worker"' in gate
+        assert 'cls.ui_worker_self_test()' in smoke
+        assert 'SilverUiClient.command' in smoke
+
+
+    @classmethod
+    def test_default_installer_copy_publishes_complete_update_manifest(cls):
+        build=(Path(__file__).resolve().parents[1]/'tools/build_siLAssistent.ps1').read_text(encoding='utf-8')
+        default=build[build.index('if ($InstallerCopyDirectory -and -not $LocalOnly)'):build.index('    if ($PublishDirectory) {')]
+        assert default.index('Move-Item -LiteralPath $TemporaryInstaller')<default.index('tools\\write_release_manifest.py')
+        assert 'ini\\siLAssistent_Update.ini' in default
+        assert '(Join-Path $Root "siLAssistent_Update.ini")' in default
+        assert '--installer $CopiedInstaller --sha256 $LocalHash' in default

@@ -85,6 +85,8 @@ class DcmEditor:
         try:
             path=Path(value)
             if not path.is_absolute():path=Path(setup).parent/path
+            from ..core.network_share import NetworkShare
+            NetworkShare.require_file(path)
             if path.suffix.lower() not in (".dcm",".aed") or not path.is_file():raise ValueError("Die Datei wurde nicht gefunden: "+str(path))
             editor=Config.state().get("DcmEditorPath","")
             if not editor or not Path(editor).is_file():editor=cls.choose(parent)

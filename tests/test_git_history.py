@@ -68,3 +68,26 @@ class GitHistoryTests(unittest.TestCase):
             assert thread.call_args.kwargs["args"][1:4]==("repo","ECM","devAGK")
             window._git["busy"]=False
             window.close()
+
+
+def test_rendered_commit_pixels_alternate_turquoise_and_dark_with_remote_pink():
+    from PySide6.QtTest import QTest
+    from source.ui.dialogs import Dialogs
+    app=QApplication.instance() or QApplication([])
+    window=QMainWindow();window.setStyleSheet(Dialogs.style());workspace=QWidget();window.setCentralWidget(workspace)
+    GitCommitView.attach(window,workspace)
+    commits=[dict(sha=str(i),short=str(i),date="2026-11-23",author="Test",subject="Commit message",body="Readable description") for i in range(3)]
+    state=window._commits
+    state["result"]={name:dict(branch="main",commits=commits,remote_commits=[dict(commits[0],sha="remote",subject="New remote commit")],incoming=[]) for name in GitHistory.REPOSITORIES}
+    GitCommitView.render(window);window.resize(1500,800);window.show();QTest.qWait(60)
+    listing=state["panels"]["SimFiles"][1]
+    def colors():
+        image=listing.viewport().grab().toImage()
+        return [image.pixelColor(listing.visualItemRect(listing.item(i)).right()-3,listing.visualItemRect(listing.item(i)).top()+3).name() for i in range(3)]
+    assert colors()==["#99f6e4","#243047","#99f6e4"]
+    for info in state["result"].values():info["incoming"]=["remote"]
+    GitCommitView.render(window);QTest.qWait(40)
+    assert colors()==["#f9a8d4","#99f6e4","#243047"]
+    state["result"]["SimFiles"]["incoming"]=[];GitCommitView.render(window);QTest.qWait(40)
+    assert colors()==["#99f6e4","#243047","#99f6e4"]
+    window.hide();window.deleteLater();app.processEvents()

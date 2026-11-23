@@ -24,7 +24,9 @@ class SilverLicences:
     @classmethod
     def read(cls, ini):
         parser=configparser.ConfigParser(interpolation=None)
-        parser.read(Path(ini),encoding="utf-8-sig")
+        from ..core.network_share import NetworkShare
+        if NetworkShare.matches(ini):parser.read_string(NetworkShare.read_bytes(ini).decode("utf-8-sig"))
+        else:parser.read(Path(ini),encoding="utf-8-sig")
         value=parser.get("UPDATE","silverLicences",fallback="")
         return cls.normalize(value)
 

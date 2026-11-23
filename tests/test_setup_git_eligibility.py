@@ -6,24 +6,23 @@ from source.core.config import Config
 
 class SetupGitEligibilityTests(unittest.TestCase):
     @classmethod
-    def test_no_licence_never_checks_or_offers_update(cls):
-        with patch.object(Config,"state",return_value={"GitUserLicenceState":False}),patch.object(GitTool,"repository_check") as access,patch.object(SetupUpdates,"check") as counter:
-            assert not SetupUpdates.check_mode("git")["available"]
-            access.assert_not_called();counter.assert_not_called()
+    def test_no_licence_still_checks_shared_counter_without_repo_access(cls):
+        with patch.object(Config,"state",return_value={"GitUserLicenceState":False}),patch.object(GitTool,"repository_check") as access,patch.object(SetupUpdates,"check",return_value={"available":True,"counter":7}) as counter:
+            assert SetupUpdates.check_mode("git")["available"]
+            access.assert_not_called();counter.assert_called_once()
 
     @classmethod
-    def test_denied_repo_never_checks_or_offers_update(cls):
-        with patch.object(Config,"state",return_value={"GitUserLicenceState":True}),patch.object(Config,"set_state"),patch.object(GitTool,"windows_user",return_value={"username":"USER"}),patch.object(GitTool,"repository_check",return_value={"allowed":False}),patch.object(SetupUpdates,"check") as counter:
-            result=SetupUpdates.check_mode("git")
-            assert not result["available"] and not result["git_allowed"]
-            counter.assert_not_called()
+    def test_denied_repo_does_not_hide_manual_update_option(cls):
+        with patch.object(GitTool,"repository_check",return_value={"allowed":False}) as access,patch.object(SetupUpdates,"check",return_value={"available":True}) as counter:
+            assert SetupUpdates.check_mode("git")["available"]
+            access.assert_not_called();counter.assert_called_once()
 
     @classmethod
-    def test_licence_and_verified_repo_allow_update_check(cls):
-        with patch.object(Config,"state",return_value={"GitUserLicenceState":True}),patch.object(Config,"set_state"),patch.object(GitTool,"windows_user",return_value={"username":"USER"}),patch.object(GitTool,"repository_check",return_value={"allowed":True}) as access,patch.object(SetupUpdates,"check",return_value={"available":True,"counter":7}):
+    def test_shared_offer_does_not_probe_repo_before_route_selection(cls):
+        with patch.object(GitTool,"repository_check") as access,patch.object(SetupUpdates,"check",return_value={"available":True,"counter":7}):
             result=SetupUpdates.check_mode("git","USER")
-            assert result["available"] and result["git_allowed"]
-            access.assert_called_once_with("USER",persist=False)
+            assert result["available"]
+            access.assert_not_called()
 
     @classmethod
     def test_drive_update_is_independent_of_git_permissions(cls):

@@ -48,7 +48,7 @@ class JiraAccessTests(unittest.TestCase):
         assert JiraAccess.classify(45869,"unknown",cls.USER,{**cls.BOARD,"project":"OTHER"})=="unknown"
 
     @classmethod
-    def test_selector_has_five_actions_with_correct_routes(cls):
+    def test_selector_has_board_actions_request_and_close_with_correct_routes(cls):
         import os
         os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
         from PySide6.QtWidgets import QApplication
@@ -61,7 +61,7 @@ class JiraAccessTests(unittest.TestCase):
             JiraTool.open()
             assert [call.args[0] for call in navigate.call_args_list]==list(JiraAccess.BOARD_IDS)
             request.assert_called_once()
-            assert cls._buttons==[*JiraAccess.BOARD_IDS,"Jira-Zugriff beantragen"]
+            assert cls._buttons==[*JiraAccess.BOARD_IDS,"Jira-Zugriff beantragen","Schließen"]
 
     @classmethod
     def click_selector_buttons(cls):

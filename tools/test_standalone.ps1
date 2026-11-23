@@ -29,7 +29,7 @@ try {
     }
     if ($Process.ExitCode -ne 0) { throw "Standalone-Selbsttest fehlgeschlagen." }
     $Result = Get-Content -LiteralPath $Report -Raw | ConvertFrom-Json
-    foreach ($Check in @("ok","packaged","self_contained_workers","bundled_runtime","multiprocessing","silver_api_worker","offline_drivers","launcher_ui","setup_ui")) {
+    foreach ($Check in @("ok","packaged","self_contained_workers","bundled_runtime","multiprocessing","silver_api_worker","silver_ui_worker", "ui_lifetime","offline_drivers","launcher_ui","setup_ui")) {
         if ($Result.$Check -ne $true) { throw "Standalone-Pruefung fehlgeschlagen: $Check" }
     }
     Write-Host "Standalone-Pruefung ohne Python im PATH erfolgreich: $Report"

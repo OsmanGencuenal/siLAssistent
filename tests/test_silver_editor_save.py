@@ -26,32 +26,19 @@ def test_native_save_button_uses_windows_message_click():
 
 
 def test_editor_is_left_before_api_changes_without_screen_coordinates():
-    import sys
-    from types import SimpleNamespace
-    from unittest.mock import patch
-    com=Mock();com.COINIT_MULTITHREADED=0
     desktop=Mock();window=Mock();gui=Mock();sfu=Mock()
     gui.window_text.return_value="GUI (129)";gui.is_selected.return_value=True
     sfu.window_text.return_value="ECM_MRG12_Slave.sil (3754)"
     window.descendants.return_value=[sfu,gui]
     desktop.windows.side_effect=[[window],[]]
-    factory=Mock(return_value=desktop)
-    with patch.dict(sys.modules,{"pythoncom":com,"pywinauto":SimpleNamespace(Desktop=factory)}):
-        SilverEditorSave.clear_editor(42)
+    SilverEditorSave.clear_on_desktop(desktop,42)
     gui.select.assert_called_once();sfu.select.assert_not_called()
-    com.CoUninitialize.assert_called_once()
 
 
 def test_ambiguous_gui_tree_does_not_switch_other_modules():
-    import sys
-    from types import SimpleNamespace
-    from unittest.mock import patch
     import pytest
-    com=Mock();com.COINIT_MULTITHREADED=0
     desktop=Mock();window=Mock();gui=Mock();gui.window_text.return_value="GUI (129)"
     window.descendants.return_value=[gui,gui];desktop.windows.return_value=[window]
-    with patch.dict(sys.modules,{"pythoncom":com,"pywinauto":SimpleNamespace(Desktop=Mock(return_value=desktop))}):
-        with pytest.raises(RuntimeError,match="eindeutig"):
-            SilverEditorSave.clear_editor(42)
+    with pytest.raises(RuntimeError,match="eindeutig"):
+        SilverEditorSave.clear_on_desktop(desktop,42)
     gui.select.assert_not_called()
-    com.CoUninitialize.assert_called_once()

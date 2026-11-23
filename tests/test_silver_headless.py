@@ -25,7 +25,7 @@ def test_headless_launch_uses_native_api_without_gui():
 def test_existing_gui_instance_keeps_actual_mode_and_is_not_restarted():
     api=Mock();grpc=Mock();remote=Mock()
     try:
-        with patch.object(Worker,"grpc_api",Mock(SilverApi=Mock(return_value=api)),create=True),patch.object(Worker,"grpc",grpc,create=True),patch.object(Worker,"remote",remote):
+        with patch.object(Worker,"grpc_api",Mock(SilverApi=Mock(return_value=api)),create=True),patch.object(Worker,"grpc",grpc,create=True),patch.object(Worker,"remote",remote),patch.object(Worker,"existing_ports",return_value=[12345]):
             result=Worker.connect({"path":"setup.sil","gui":False,"existing":[{"pid":42,"ports":[12345],"headless":False}]})
             assert result["reused"] and not result["headless"]
             remote.RemoteSilver.assert_not_called()

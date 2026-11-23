@@ -1,4 +1,5 @@
 """Setup counter checks and updates in spawn workers, without blocking Qt."""
+from ..core.network_share import NetworkShare
 import configparser
 import multiprocessing
 import os
@@ -19,14 +20,15 @@ class SetupUpdates:
     @classmethod
     def manifest(cls):
         parser=configparser.ConfigParser(interpolation=None)
-        raw=Path(Config.load()["update_ini_path"]).read_bytes()
+        raw=NetworkShare.read_bytes(Config.load()["update_ini_path"])
         try: text=raw.decode("utf-8-sig")
         except UnicodeDecodeError: text=raw.decode("cp1252")
         parser.read_string(text)
+        Config.initialize_setup_counter(parser)
         Config.sync_update_paths(parser)
         counter=parser.getint("UPDATE","silSetupVersionCounter")
         if counter<0: raise ValueError("Ungültiger Setup-Counter auf dem Laufwerk.")
-        return {"counter":counter,"source":parser.get("PATH","silSetupPath",fallback=parser.get("UPDATE","silSetupPath",fallback="")).strip()}
+        return {"counter":counter,"source":Config.network_path(parser.get("PATH","silSetupPath",fallback=parser.get("UPDATE","silSetupPath",fallback="")).strip())}
 
     @classmethod
     def check(cls):
@@ -36,23 +38,14 @@ class SetupUpdates:
 
     @classmethod
     def check_mode(cls,mode,user_id=None):
-        if mode!="git":return cls.check()
-        if not Config.state()["GitUserLicenceState"]:
-            return {"available":False,"git_allowed":False}
-        from .git import GitTool
-        identity=user_id if user_id is not None else GitTool.windows_user()["username"]
-        access=GitTool.repository_check(identity,persist=False)
-        # Persist rights only for the actual Windows account, never a test identity.
-        if identity.strip().casefold()==GitTool.windows_user()["username"].casefold():
-            Config.set_state("GitUserState",bool(access["allowed"]))
-        if not access["allowed"]:
-            return {"available":False,"git_allowed":False}
-        return {**cls.check(),"git_allowed":True}
+        # The shared update offer must also work without Git/license/repo access.
+        # Check those only after the user chooses the Git route.
+        return cls.check()
 
     @classmethod
     def git_update(cls, path, progress=None):
         from .git_actions import GitActions
-        return GitActions.pull(path,branch="main",progress=progress)
+        return GitActions.pull(path,progress=progress)
 
     @classmethod
     def check_cancelled(cls,cancelled):
@@ -62,11 +55,9 @@ class SetupUpdates:
     @classmethod
     def copy_file(cls,source,target,cancelled):
         cls.check_cancelled(cancelled)
-        with open(source,"rb") as incoming,open(target,"wb") as outgoing:
-            while True:
+        with open(target,"wb") as outgoing:
+            for block in NetworkShare.chunks(source):
                 cls.check_cancelled(cancelled)
-                block=incoming.read(1024*1024)
-                if not block:break
                 outgoing.write(block)
         shutil.copystat(source,target)
         return target
@@ -74,14 +65,16 @@ class SetupUpdates:
     @classmethod
     def copy_update(cls, source, target, cancelled=None):
         cls.check_cancelled(cancelled)
-        source=Path(source).resolve(); target=Path(target).resolve()
+        with NetworkShare.access(source):source=Path(source).resolve()
+        NetworkShare.require_directory(source)
+        target=Path(target).resolve()
         if not source.is_dir() or source.name.casefold()!="simfiles":
             raise ValueError("Der LW-Quellpfad muss auf einen vorhandenen SimFiles-Ordner zeigen.")
         if target.name.casefold()!="simfiles" or source==target or source.is_relative_to(target) or target.is_relative_to(source):
             raise ValueError("Quell- und Zielordner sind nicht für dieses Setup-Update geeignet.")
         if (target/".git").exists():
             raise ValueError("Dieser Zielordner ist ein Git-Repo. Bitte über Git aktualisieren.")
-        for base,dirs,files in os.walk(source):
+        for base,dirs,files in os.walk(source,onerror=NetworkShare.walk_error):
             cls.check_cancelled(cancelled)
             for name in dirs+files:
                 item=Path(base)/name
@@ -108,9 +101,16 @@ class SetupUpdates:
     @classmethod
     def worker(cls, pipe, operation, release=None, target=None, cancelled=None, mode=None, user_id=None):
         try:
+            if release is not None:release={"counter":release["counter"],"source":release["source"]}
             if operation in ("pull","revert"):
                 from .git_actions import GitActions
+                if release is not None and cls.manifest()!=release:
+                    raise RuntimeError("Der LW-Setupstand hat sich geändert. Bitte erneut prüfen.")
                 result=GitActions.pull(target,progress=lambda branch:pipe.send({"progress_branch":branch})) if operation=="pull" else GitActions.revert(target)
+                if release is not None:
+                    if cls.manifest()!=release:
+                        raise RuntimeError("LW-Setupstand hat sich während des Updates geändert. Bitte erneut prüfen; Counter bleibt unverändert.")
+                    Config.set_state("silSetupVersionCounter",str(release["counter"]))
             elif operation=="check": result=cls.check_mode(mode,user_id)
             else:
                 current=cls.manifest()
@@ -132,13 +132,13 @@ class SetupUpdates:
         finally: pipe.close()
 
     @classmethod
-    def manual(cls,parent,operation):
+    def manual(cls,parent,operation,release=None):
         from .git_installation import GitInstallation
         from .git import GitTool
         from ..ui.dialogs import Dialogs
         from ..ui.git_licence import GitLicenceFlow
         if getattr(cls,"_active",False) or parent._git["busy"]:return
-        if not GitInstallation.require(parent,retry=lambda:cls.manual(parent,operation)):return
+        if not GitInstallation.require(parent,retry=lambda:cls.manual(parent,operation,release=release)):return
         if not GitLicenceFlow.allow_git_action(parent):return
         if parent._git["user"].text().strip().casefold()!=GitTool.windows_user()["username"].casefold():
             Dialogs.message("User-ID nicht bestätigt","Bitte die User-ID des angemeldeten Windows-Benutzers verwenden.",parent);return
@@ -146,8 +146,11 @@ class SetupUpdates:
             from PySide6.QtWidgets import QMessageBox
             answer=QMessageBox.question(parent,"Versionierte Änderungen verwerfen?","Alle Änderungen an versionierten Dateien in SimFiles und seinen Submodulen werden auf den jeweiligen lokalen Commit-Stand zurückgesetzt. Diese Änderungen werden verworfen. Fortfahren?")
             if answer!=QMessageBox.StandardButton.Yes:return
+        if release is not None:
+            # Discard a startup access-check reply that could unlock this new pull.
+            parent._git["request"]=parent._git.get("request",0)+1
         cls._active=True;parent._git["busy"]=True
-        cls.spawn(parent,"git",operation,target=Config.state()["GitLocalRepoPath"])
+        cls.spawn(parent,"git",operation,release=release,target=Config.state()["GitLocalRepoPath"])
 
     @classmethod
     def watch(cls,parent,mode):
@@ -175,11 +178,7 @@ class SetupUpdates:
         from shiboken6 import isValid
         if not isValid(parent) or not parent.isVisible():parent=Launcher._window
         if parent is None or not isValid(parent):return
-        if getattr(cls,"_active",False) or getattr(parent,"_git",{}).get("busy",False):
-            if timer is not None:timer.start(15000)
-            return
-        state=Config.state()
-        if not state["GitLocalRepoPath" if mode=="git" else "DriveSetupLocalPath"]:
+        if getattr(cls,"_active",False) or getattr(cls,"_update_dialog_open",False) or getattr(parent,"_git",{}).get("busy",False):
             if timer is not None:timer.start(15000)
             return
         stamp=now.strftime("%Y-%m-%d %H %z")
@@ -188,7 +187,7 @@ class SetupUpdates:
         checked[mode]=stamp
         cls._hourly_checked=checked
         cls._automatic_check=True
-        cls.start(parent,mode,offer=offer)
+        cls.start(parent,mode,offer=True)
 
     @classmethod
     def start(cls, parent, mode, offer=True):
@@ -303,7 +302,7 @@ class SetupUpdates:
             GitWindow.access_notice(state["parent"],result["error"],force_request=True)
             return
         if result.get("error"):
-            if state.get("automatic"):
+            if state.get("automatic") and not NetworkShare.is_error(result["error"]):
                 import logging
                 logging.getLogger("siLAssistent").info("Automatische Setup-Prüfung: %s",result["error"])
                 return
@@ -315,35 +314,78 @@ class SetupUpdates:
         release=result["result"]
         if not state.get("offer",True):return
         if not release["available"]: return
-        if state["mode"]=="git" and (not release.get("git_allowed",False) or not Config.state()["GitUserLicenceState"]):return
         cls.confirm(state["parent"],state["mode"],release)
 
     @classmethod
     def confirm(cls,parent,mode,release):
-        from PySide6.QtWidgets import QPushButton,QFileDialog
-        from ..ui.dialogs import Dialogs
-        dialog,footer,body=Dialogs.card("Setup-Update vorhanden","Es liegt ein Setup-Update.\n\nWollen Sie das Setup aktualisieren?",parent)
-        update=QPushButton("Update");cancel=QPushButton("Abbrechen")
-        update.clicked.connect(dialog.accept);cancel.clicked.connect(dialog.reject)
-        footer.addWidget(update);footer.addWidget(cancel)
+        from PySide6.QtWidgets import QPushButton
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(0,lambda:Dialogs.foreground(dialog))
-        if not dialog.exec(): return
-        if getattr(parent,"_git",{}).get("busy",False):
-            Dialogs.message("Git-Vorgang läuft","Bitte den laufenden Git-Vorgang zuerst beenden.",parent);return
+        from ..ui.dialogs import Dialogs
+        from ..ui.button_gradients import ButtonGradients
+        if getattr(cls,"_update_dialog_open",False):return
+        cls._update_dialog_open=True
+        try:
+            dialog,footer,body=Dialogs.card("Setup-Update vorhanden","Ein neuer Setup-Stand ist verfügbar.\n\nWie möchten Sie Ihr lokales Setup aktualisieren?",parent)
+            git=QPushButton("Update für Git-User");drive=QPushButton("Update für manuelle User");cancel=QPushButton("Abbrechen")
+            ButtonGradients.apply(git,"#99f6e4",padding="10px 16px")
+            ButtonGradients.apply(drive,"#172554",padding="10px 16px")
+            git.clicked.connect(lambda:dialog.done(1));drive.clicked.connect(lambda:dialog.done(2));cancel.clicked.connect(dialog.reject)
+            footer.addWidget(git);footer.addWidget(drive);footer.addWidget(cancel)
+            QTimer.singleShot(0,lambda:Dialogs.foreground(dialog))
+            choice=dialog.exec()
+            if choice in (1,2):cls.update_selected(parent,"git" if choice==1 else "drive",release)
+            else:
+                from .git_commit_view import GitCommitView
+                GitCommitView.preview_updates(parent)
+        finally:cls._update_dialog_open=False
+
+    @classmethod
+    def update_selected(cls,parent,mode,release):
+        from ..ui.dialogs import Dialogs
+        if getattr(cls,"_active",False) or getattr(parent,"_git",{}).get("busy",False):
+            Dialogs.message("Setup-Vorgang läuft","Bitte den laufenden Vorgang zuerst beenden.",parent);return
+        key="GitLocalRepoPath" if mode=="git" else "DriveSetupLocalPath"
+        target=Config.state()[key].strip()
+        folder=Path(target) if target else None
+        ready=folder is not None and folder.is_dir() and folder.name.casefold()=="simfiles"
+        if ready and mode=="git":ready=(folder/".git").exists()
+        if not ready:
+            cls.setup_required(parent,mode)
+            return
+        snapshot={"counter":release["counter"],"source":release["source"]}
         if mode=="git":
-            from .git_installation import GitInstallation
-            if not GitInstallation.require(parent,retry=lambda:cls.confirm(parent,mode,release)): return
-            target=Config.state()["GitLocalRepoPath"]
+            from .git import GitTool
+            window=parent if hasattr(parent,"_git") else GitTool.open(parent)
+            # Same entry point and safeguards as the existing Pull (Update) button.
+            cls.manual(window,"pull",release=snapshot)
         else:
-            if not release["source"]:
+            if not snapshot["source"]:
                 Dialogs.message("LW-Setup nicht konfiguriert","In der LW-Update-INI fehlt silSetupPath (Pfad zum SimFiles-Ordner).",parent);return
-            target=Config.state()["DriveSetupLocalPath"]
-            if not target:
-                selected=QFileDialog.getExistingDirectory(parent,"Lokalen Zielordner für SimFiles wählen")
-                if not selected:return
-                from .drive_setup import DriveSetup
-                target=str(DriveSetup.target(selected))
-        cls._active=True
-        if hasattr(parent,"_git"): parent._git["busy"]=True
-        cls.spawn(parent,mode,mode,release,target)
+            cls._active=True
+            if hasattr(parent,"_git"):parent._git["busy"]=True
+            cls.spawn(parent,"drive","drive",release=snapshot,target=target)
+
+    @classmethod
+    def setup_required(cls,parent,mode):
+        from PySide6.QtWidgets import QPushButton
+        from PySide6.QtCore import QTimer
+        from ..ui.dialogs import Dialogs
+        from ..ui.button_gradients import ButtonGradients
+        git=mode=="git"
+        text=("Bitte richten Sie das Git-Setup zuerst lokal ein. Es ist noch kein gültiger lokaler SimFiles-Repo-Ordner eingerichtet." if git else
+              "Bitte richten Sie zuerst eine lokale manuelle Setup-Kopie ein. Es ist noch kein gültiger lokaler SimFiles-Ordner eingerichtet.")
+        dialog,footer,body=Dialogs.card("Lokales Setup fehlt",text,parent)
+        setup=QPushButton("Setup Lokal Download (Clonen)" if git else "Setup vom Laufwerk");cancel=QPushButton("Abbrechen")
+        ButtonGradients.apply(setup,"#99f6e4" if git else "#172554",padding="10px 16px")
+        setup.clicked.connect(dialog.accept);cancel.clicked.connect(dialog.reject)
+        footer.addWidget(setup);footer.addWidget(cancel)
+        QTimer.singleShot(0,lambda:Dialogs.foreground(dialog))
+        if not dialog.exec():return
+        if git:
+            from .git import GitTool
+            from .git_window import GitWindow
+            window=parent if hasattr(parent,"_git") else GitTool.open(parent)
+            GitWindow.clone(window)
+        else:
+            from .drive_setup import DriveSetup
+            DriveSetup.open(parent)

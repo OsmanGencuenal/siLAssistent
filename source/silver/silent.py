@@ -128,7 +128,7 @@ class SilverSilent:
         cls.validate_request(request)
         # Validate embedded licence configuration before launching the installer.
         env = cls.environment()
-        log_root = Path(request["local_app_data"]) / "siLAssistent"
+        log_root = Runtime.log_root(request["local_app_data"])
         log_root.mkdir(parents=True, exist_ok=True)
         log = log_root / ("silver_silent_" + str(time.time_ns()) + ".log")
         command = cls.command(installer, version, request, log)
@@ -147,7 +147,7 @@ class SilverSilent:
                 raise AssistantError("Silver-Silent-Installation antwortet seit zwei Stunden nicht. Protokoll: " + str(log))
             if not started and cls.log_has_started(log):
                 started = True
-                messages.put(("installation_started", "Silver wird im Hintergrund installiert. Der Assistent wird geschlossen."))
+                messages.put(("installation_started", "Silver wird installiert. Bitte warten; der Assistent bleibt bis zum geprüften Abschluss geöffnet."))
                 record("installation_started", mode="silent")
             cancelled.wait(0.3)
         if cancelled.is_set():

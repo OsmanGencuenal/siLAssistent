@@ -10,7 +10,7 @@ from source.silver.operation import SilverOperation as Op
 
 def panel():
     app=QApplication.instance() or QApplication([]);owner=QWidget();sent=[]
-    view=Panel.create(owner,lambda *args:sent.append(args));slave,master=Files.TARGETS
+    view=Panel.create(owner,lambda *args:sent.append(args));view._grouped.setChecked(False);slave,master=Files.TARGETS
     Panel.populate(view,{slave:{"files":["s.dcm"],"variant":"s.aed"},master:{"files":["m.dcm"],"variant":"m.aed"}})
     return app,owner,view,sent,slave,master
 
@@ -89,4 +89,17 @@ def test_late_grouping_does_not_add_a_file_already_present_at_that_position():
         Panel.change(view,master,1,"extra.dcm")
         view._grouped.setChecked(True);view._flash.click()
         assert sent[-1][1][slave]==["s.dcm","extra.dcm"]
+    finally:view.deleteLater();owner.deleteLater();app.processEvents()
+
+
+
+def test_new_panel_groups_both_flash_targets_by_default():
+    app=QApplication.instance() or QApplication([]);owner=QWidget();sent=[]
+    view=Panel.create(owner,lambda *args:sent.append(args));slave,master=Files.TARGETS
+    try:
+        assert view._grouped.isChecked()
+        Panel.populate(view,{slave:{"files":["s.dcm"]},master:{"files":["m.dcm"]}})
+        Panel.change(view,master,0,"shared.dcm");view._flash.click()
+        assert set(sent[-1][1])=={slave,master}
+        assert sent[-1][1][slave]==sent[-1][1][master]==["shared.dcm"]
     finally:view.deleteLater();owner.deleteLater();app.processEvents()

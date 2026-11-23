@@ -10,9 +10,10 @@ class JiraTool:
     _results=queue.Queue()
     _stopping=threading.Event()
     REQUEST_ACCESS="Jira-Zugriff beantragen"
+    FOCUS_BROWSER="__jira_foreground__"
     ACCESS_WAIT_SECONDS=30
     ACCESS_PENDING=("joining","site_access_pending")
-    STATUS={"role_preparing":"ALICE-Rollensuche nach devottosil wird vorbereitet ...",
+    STATUS={"role_focus_failed":"Bitte wechseln Sie zur bereits geöffneten Antragsseite im Browser. Kehren Sie nach dem Antrag zum Jira-Fenster in siLAssistent zurück.","role_preparing":"ALICE-Rollensuche nach devottosil wird vorbereitet ...",
             "role_login_required":"Bitte direkt in Edge bei ALICE anmelden. Danach wird die Rollensuche automatisch vorbereitet.",
             "role_ready":"Die drei DEVOTTOSIL-Jira-Rollen werden angezeigt. Bitte selbst eine Rolle auswählen und mit Weiter fortfahren.",
             "role_timeout":"ALICE-Rollensuche konnte nicht bestätigt werden. Bitte Anmeldung und Verbindung prüfen oder in ALICE selbst nach devottosil suchen.",
@@ -23,7 +24,7 @@ class JiraTool:
             "access_unconfirmed":"Jira-Zugang konnte nicht bestätigt werden. Sie befinden sich noch im Jira-Beitrittsprozess. Möglicherweise fehlt die Freigabe für die Firmen-Jira-Seite.",
             "allowed":"Zugriff auf dieses Jira-Board bestätigt.",
             "denied":"Jira verweigert den Zugriff auf dieses Board (angemeldete Sitzung, HTTP 403).",
-            "not_visible_or_missing":"Das Board ist nicht sichtbar oder nicht vorhanden (HTTP 404). Fehlende Rechte und ein gelöschtes Board sind nicht sicher unterscheidbar.",
+            "not_visible_or_missing":"Das Board ist nicht sichtbar oder nicht vorhanden (HTTP 404).",
             "rate_limited":"Jira begrenzt die Abfragen. Bitte später erneut versuchen.",
             "service_error":"Jira meldet einen Serverfehler. Die Berechtigung konnte nicht geprüft werden.",
             "unknown":"Zugriff noch nicht eindeutig bestätigt. Bitte Anmeldung und Jira-Seite prüfen.",
@@ -35,6 +36,7 @@ class JiraTool:
         from PySide6.QtWidgets import QPushButton,QLabel
         from PySide6.QtCore import QTimer
         from ..ui.dialogs import Dialogs
+        from ..ui.button_gradients import ButtonGradients
         dialog,footer,body=Dialogs.card("Jira","Jira-Bereich auswählen. Eine erforderliche Anmeldung erfolgt direkt in Edge.",parent)
         dialog.setProperty("siLAssistentTool",True)
         colors={
@@ -49,8 +51,14 @@ class JiraTool:
             normal,hover,pressed=colors[name]
             foreground="#ffffff" if name==cls.REQUEST_ACCESS else "#172554"
             button.setStyleSheet("QPushButton {background:"+normal+"; color:"+foreground+"; font-weight:700; border:1px solid "+normal+";} QPushButton:hover {background:"+hover+";} QPushButton:pressed {background:"+pressed+";}")
+            if name==cls.REQUEST_ACCESS:
+                button.setObjectName("jiraRequestAccess")
+                ButtonGradients.apply(button,"jira_request",padding="12px 16px",font="700 14pt 'Segoe UI'")
             button.clicked.connect(lambda checked=False,name=name:cls.request_access(dialog) if name=="Jira-Zugriff beantragen" else cls.navigate(name))
             footer.addWidget(button)
+        close=QPushButton("Schließen");close.setObjectName("jiraClose")
+        ButtonGradients.apply(close,"#dc2626",padding="10px 16px",font="700 13pt 'Segoe UI'")
+        close.clicked.connect(dialog.reject);footer.addWidget(close)
         status=QLabel("");status.setWordWrap(True);footer.addWidget(status)
         dialog.resize(600,min(650,dialog.maximumHeight()))
         timer=QTimer(dialog);timer.timeout.connect(lambda:cls.poll(dialog,status));timer.start(200)
@@ -133,6 +141,14 @@ class JiraTool:
             while not cls._stopping.is_set():
                 try:name,navigate=cls._commands.get(timeout=0.3)
                 except queue.Empty:continue
+                if name==cls.FOCUS_BROWSER:
+                    if driver is not None:
+                        try:cls.foreground_browser(driver)
+                        except Exception:
+                            import logging
+                            logging.getLogger(__name__).exception("Jira-Antragsseite konnte nicht aktiviert werden")
+                            cls._results.put((cls.REQUEST_ACCESS,"role_focus_failed"))
+                    continue
                 for attempt in range(2):
                     try:
                         driver,recreated=cls.ensure_browser(driver)
@@ -169,6 +185,17 @@ class JiraTool:
                 if name!=getattr(cls,"_active_name",name):continue
                 label.setText(name+" ::\n"+cls.STATUS[state])
                 label.setStyleSheet("color:"+("#22c55e" if state=="allowed" else "#fca5a5" if state=="denied" else "#f59e0b")+";")
+                if state=="role_preparing":dialog._jira_roles_notified=False
+                if state=="role_ready" and not getattr(dialog,"_jira_roles_notified",False):
+                    dialog._jira_roles_notified=True
+                    dialog._jira_notice_open=True
+                    try:
+                        accepted=Dialogs.message("Jira-Antrag – Rolle auswählen","BITTE WÄHLEN SIE IM BROWSER DIE ERFORDERLICHE ROLLE AUS UND SENDEN SIE DEN ANTRAG ANSCHLIESSEND SELBST AB. Kehren Sie danach zum Jira-Fenster in siLAssistent zurück.",dialog)
+                        if accepted==1:
+                            from PySide6.QtCore import QTimer
+                            # Let Qt finish restoring its modal owner first.
+                            QTimer.singleShot(200,cls.request_browser_foreground)
+                    finally:dialog._jira_notice_open=False
                 if state=="access_unconfirmed":
                     dialog._jira_notice_open=True
                     try:cls.pending_dialog(dialog,name)
@@ -176,6 +203,47 @@ class JiraTool:
                 if state in ("denied","not_visible_or_missing"):
                     Dialogs.message("Jira-Zugriff nicht möglich",cls.STATUS[state],dialog)
         except queue.Empty:pass
+
+    @classmethod
+    def request_browser_foreground(cls):
+        if not cls._stopping.is_set():cls._commands.put((cls.FOCUS_BROWSER,False))
+
+    @classmethod
+    def foreground_browser(cls,driver):
+        import psutil
+        import win32gui,win32process
+        # Keep the existing tab, its selections and the unfinished request.
+        driver.switch_to.window(driver.current_window_handle)
+        driver.execute_cdp_cmd("Page.bringToFront",{})
+        pid=driver.service.process.pid
+        pids={pid}|{child.pid for child in psutil.Process(pid).children(recursive=True)}
+        title=driver.title.strip();windows=[]
+        win32gui.EnumWindows(lambda hwnd,unused:cls.browser_window(hwnd,pids,title,windows),None)
+        if len(windows)!=1:raise RuntimeError('Das Fenster der Jira-Browsersitzung ist nicht eindeutig.')
+        cls.activate_browser_window(windows[0])
+
+    @classmethod
+    def browser_window(cls,hwnd,pids,title,windows):
+        import win32gui,win32process
+        if (win32process.GetWindowThreadProcessId(hwnd)[1] in pids and win32gui.IsWindowVisible(hwnd)
+            and win32gui.GetClassName(hwnd)=='Chrome_WidgetWin_1'
+            and (not title or title in win32gui.GetWindowText(hwnd))):windows.append(hwnd)
+        return True
+
+    @classmethod
+    def activate_browser_window(cls,hwnd):
+        import win32api,win32gui,win32process,win32con
+        current=win32api.GetCurrentThreadId();attached=[]
+        foreground=win32gui.GetForegroundWindow()
+        threads={win32process.GetWindowThreadProcessId(hwnd)[0]}
+        if foreground:threads.add(win32process.GetWindowThreadProcessId(foreground)[0])
+        try:
+            for thread in threads-{current}:
+                win32process.AttachThreadInput(current,thread,True);attached.append(thread)
+            if win32gui.IsIconic(hwnd):win32gui.ShowWindow(hwnd,win32con.SW_RESTORE)
+            win32gui.BringWindowToTop(hwnd);win32gui.SetForegroundWindow(hwnd)
+        finally:
+            for thread in reversed(attached):win32process.AttachThreadInput(current,thread,False)
 
     @classmethod
     def pending_dialog(cls,parent,name):
@@ -186,7 +254,8 @@ class JiraTool:
         body.setStyleSheet("color:#f59e0b; font:12pt 'Segoe UI';")
         retry=QPushButton("Erneut prüfen")
         request=QPushButton("Jira-Zugriff beantragen")
-        request.setStyleSheet("QPushButton {background:#172554; color:#ffffff; font-weight:700; border:1px solid #172554;} QPushButton:hover {background:#1e3a8a;} QPushButton:pressed {background:#1e40af;}")
+        from ..ui.button_gradients import ButtonGradients
+        ButtonGradients.apply(request,"jira_request",padding="12px 16px")
         cancel=QPushButton("Abbrechen")
         retry.clicked.connect(dialog.accept)
         request.clicked.connect(lambda:dialog.done(2))

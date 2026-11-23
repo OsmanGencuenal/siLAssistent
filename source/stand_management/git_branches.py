@@ -17,8 +17,9 @@ class GitBranches:
             Config.set_state("GitInstallationState",False)
             raise GitMissing("Git ist nicht installiert oder wurde entfernt.")
         env=dict(os.environ,GIT_TERMINAL_PROMPT="0",GCM_INTERACTIVE="never",GIT_ASKPASS="",SSH_ASKPASS="")
+        from .git_credential_manager import GitCredentialManager
         try:
-            result=subprocess.run([git,"-C",str(path),"-c","credential.interactive=never",*args],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=timeout,env=env,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+            result=subprocess.run([git,*GitCredentialManager.options(git),"-C",str(path),"-c","credential.interactive=never",*args],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=timeout,env=env,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
         except FileNotFoundError:
             Config.set_state("GitInstallationState",False)
             raise GitMissing("Git wurde entfernt oder ist nicht mehr erreichbar.") from None
@@ -67,7 +68,7 @@ class GitBranches:
         return [entry.split("\t",1)[1] for entry in output.split("\0") if entry.startswith("160000 ") and "\t" in entry]
 
     @classmethod
-    def switch_plan(cls, path, branch, root=None, skipped=None, issues=None):
+    def switch_plan(cls, path, branch, root=None, skipped=None, issues=None, dirty_repos=None, context=None):
         path=Path(path).resolve()
         root=path if root is None else root
         skipped=[] if skipped is None else skipped
@@ -79,6 +80,7 @@ class GitBranches:
             raise RuntimeError("Ungültiges Submodul: "+str(path))
         cls.run(path,["fetch","--prune","--no-recurse-submodules","origin"])
         info=cls.refs(path)
+        if path==root and context is not None:context["active"]=info.get("active") or "Detached HEAD"
         if branch not in info["branches"]:
             if path==root:
                 raise RuntimeError("Branch „"+branch+"“ fehlt im Hauptrepo.")
@@ -86,7 +88,7 @@ class GitBranches:
             plan=[]
             for relative in cls.gitlinks(path,"HEAD"):
                 try:
-                    plan.extend(cls.switch_plan(path/relative,branch,root,skipped,issues))
+                    plan.extend(cls.switch_plan(path/relative,branch,root,skipped,issues,dirty_repos,context))
                 except (RuntimeError,ValueError) as error:
                     issues.append(str(path/relative)+": "+str(error))
             return plan
@@ -95,13 +97,28 @@ class GitBranches:
         dirty=cls.run(path,["status","--porcelain","--untracked-files=normal","--ignore-submodules=all"]).stdout.strip()
         staged=cls.run(path,["diff","--cached","--name-only"]).stdout.strip()
         if dirty or staged:
-            raise RuntimeError("Branch nicht gewechselt: lokale Änderungen in "+str(path)+". Bitte zuerst sichern bzw. committen.")
+            if dirty_repos is None:
+                raise RuntimeError("Branch nicht gewechselt: lokale Änderungen in "+str(path)+". Bitte zuerst sichern bzw. committen.")
+            import hashlib
+            delta=cls.run(path,["diff","--binary","HEAD"]).stdout
+            untracked=cls.run(path,["ls-files","--others","--exclude-standard","-z"]).stdout
+            untracked_state=[]
+            for relative in untracked.split("\0"):
+                if not relative:continue
+                item=path/relative
+                if not item.resolve().is_relative_to(root):
+                    untracked_state.append([relative,"outside-root"]);continue
+                metadata=item.lstat()
+                untracked_state.append([relative,metadata.st_size,metadata.st_mtime_ns,metadata.st_mode])
+            dirty_repos.append({"path":str(path),"branch":info.get("active") or "Detached HEAD",
+                                "status":dirty,"staged":staged,"head":cls.run(path,["rev-parse","HEAD"]).stdout.strip(),
+                                "diff":hashlib.sha256(delta.encode("utf-8")).hexdigest(),"untracked":untracked,"untracked_state":untracked_state})
         local=branch in info["local"]
         ref=("refs/heads/" if local else "refs/remotes/origin/")+branch
         plan=[(path,local)]
         for relative in cls.gitlinks(path,ref):
             try:
-                plan.extend(cls.switch_plan(path/relative,branch,root,skipped,issues))
+                plan.extend(cls.switch_plan(path/relative,branch,root,skipped,issues,dirty_repos,context))
             except (RuntimeError,ValueError) as error:
                 issues.append(str(path/relative)+": "+str(error))
         return plan
@@ -125,7 +142,7 @@ class GitBranches:
         return result
 
     @classmethod
-    def activate(cls, path, branch, user_id, submodule=None):
+    def activate(cls, path, branch, user_id, submodule=None, discard=None):
         if not Config.state()["GitUserLicenceState"]:
             raise RuntimeError("Bitte zuerst eine gültige Git User Lizenz bestätigen.")
         access=GitTool.repository_check(user_id,persist=False)
@@ -143,12 +160,20 @@ class GitBranches:
         cls.run(path,["check-ref-format","--branch",branch])
         skipped=[]
         issues=[]
-        plan=cls.switch_plan(path,branch,skipped=skipped,issues=issues)
+        dirty=[];context={}
+        plan=cls.switch_plan(path,branch,skipped=skipped,issues=issues,dirty_repos=dirty,context=context)
+        if issues:raise RuntimeError("Branchwechsel wurde vor Änderungen abgebrochen.\n\n"+"\n".join(issues))
+        approval={"root":str(path),"target":branch,"active":context.get("active","Detached HEAD"),
+                  "repositories":dirty,"plan":[[str(repo),local] for repo,local in plan]}
+        if dirty:
+            if discard!=approval:
+                return {"confirmation_required":True,"active":approval["active"],"target":branch,"approval":approval}
+            cls.discard_changes(path,dirty)
         changed=[]
         for repository,local in plan:
             try:
-                args=(["switch","--no-recurse-submodules","--no-guess","--",branch] if local else
-                      ["switch","--no-recurse-submodules","--track","-c",branch,"origin/"+branch])
+                args=(["switch","--no-recurse-submodules","--no-overwrite-ignore","--no-guess","--",branch] if local else
+                      ["switch","--no-recurse-submodules","--no-overwrite-ignore","--track","-c",branch,"origin/"+branch])
                 cls.run(repository,args)
                 active=cls.run(repository,["symbolic-ref","--quiet","--short","HEAD"]).stdout.strip()
                 if active!=branch:
@@ -161,3 +186,20 @@ class GitBranches:
         if issues:
             raise RuntimeError("Branchwechsel nicht vollständig abgeschlossen.\n\nGewechselt:\n"+"\n".join(changed)+"\n\nProbleme:\n"+"\n".join(issues)+("\n\nUnverändert:\n"+"\n".join(skipped) if skipped else ""))
         return {**(cls.refs(path) if submodule else cls.list(path,refresh=False)),"submodule_count":max(0,len(plan)-1),"skipped_submodules":skipped,"submodule_branches":cls.submodule_branches(path)}
+
+    @classmethod
+    def discard_changes(cls,root,repositories):
+        # Only the freshly rechecked, explicitly approved repositories are touched.
+        root=Path(root).resolve()
+        for item in sorted(repositories,key=lambda value:len(Path(value["path"]).parts),reverse=True):
+            folder=Path(item["path"]).resolve()
+            if not folder.is_relative_to(root) or not (folder/".git").exists():
+                raise RuntimeError("Bestätigter Repo-Pfad ist nicht mehr gültig. Bitte Branchwechsel erneut starten.")
+            actual=Path(cls.run(folder,["rev-parse","--show-toplevel"]).stdout.strip()).resolve()
+            if actual!=folder:raise RuntimeError("Repo-Zuordnung hat sich geändert. Bitte Branchwechsel erneut starten.")
+            for relative in item.get("untracked","").split("\0"):
+                if relative and not (folder/relative).resolve().is_relative_to(root):
+                    raise RuntimeError("Nicht versionierter Pfad führt außerhalb des Setup-Repositories. Es wurden dort keine Änderungen verworfen.")
+            cls.run(folder,["reset","--hard","HEAD"])
+            # Keep ignored files and nested, unrelated Git repositories.
+            cls.run(folder,["clean","-fd"])

@@ -14,8 +14,8 @@ class ProgressWindow:
         dialog.setWindowFlags(Qt.WindowType.Dialog|Qt.WindowType.FramelessWindowHint)
         dialog.setWindowModality(Qt.WindowModality.WindowModal if parent else Qt.WindowModality.NonModal)
         dialog.reject=lambda:None;dialog.closeEvent=lambda event:event.ignore()
-        update=kind=="update";accent="#f59e0b" if update else "#60a5fa"
-        title="siLAssistent Update" if update else "siLAssistent"
+        update=kind in ("update","git");accent="#f59e0b" if update else "#60a5fa"
+        title={"update":"siLAssistent Update","git":"Git-Installation","support":"siLAssistent Support"}.get(kind,"siLAssistent")
         dialog.setWindowTitle(title)
         dialog.setStyleSheet("QDialog#siLProgress {background:#1e1e2e; border:1px solid #475569;} QLabel {background:transparent; color:#e2e8f0; font:12pt 'Segoe UI';} QProgressBar {background:#323248; border:0; border-radius:4px; min-height:16px; max-height:16px;} QProgressBar::chunk {background:"+accent+"; border-radius:4px;}")
         layout=QVBoxLayout(dialog);layout.setContentsMargins(32,25,32,25);layout.setSpacing(12)
@@ -25,7 +25,7 @@ class ProgressWindow:
         image=QLabel();image.setPixmap(icon.pixmap(52,52));heading.addWidget(image)
         label=QLabel(title);label.setStyleSheet("color:"+accent+"; font:700 28pt 'Segoe UI';")
         heading.addWidget(label);heading.addStretch();layout.addLayout(heading)
-        subtitle=QLabel("Installation wird vorbereitet …" if update else "Anwendung wird vorbereitet …")
+        subtitle=QLabel("Diagnosedaten werden zusammengestellt …" if kind=="support" else "Installation wird vorbereitet …" if update else "Anwendung wird vorbereitet …")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter);layout.addWidget(subtitle)
         status=QLabel();status.setWordWrap(True);status.setStyleSheet("color:#40e0d0; font:12pt 'Segoe UI';")
         bar=QProgressBar();bar.setTextVisible(False)
@@ -41,11 +41,15 @@ class ProgressWindow:
     @classmethod
     def stage(cls,dialog,text,value,paint=False):
         dialog._status.setText(text);dialog._bar.setRange(0,0 if value is None else 100)
-        if value is not None:dialog._bar.setValue(value)
-        dialog._percent.setText("Bitte warten …" if value is None else str(value)+" %")
+        if value is None:
+            dialog._percent.setText("");dialog._percent.hide()
+        else:
+            dialog._bar.setValue(int(value))
+            dialog._percent.setText(f"{value:g} %".replace(".",","));dialog._percent.show()
         dialog.show()
         if paint:QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     @classmethod
     def finish(cls,dialog):
-        if dialog is not None:dialog.hide();dialog.deleteLater()
+        if dialog is not None:
+            dialog.hide();dialog.deleteLater()

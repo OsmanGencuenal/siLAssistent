@@ -68,6 +68,15 @@ Type: files; Name: "{app}\siLAssistent.ini.lock"
 Type: dirifempty; Name: "{app}"
 
 [Code]
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  { ssDone is reached only after a successful installation, including manual runs. }
+  if CurStep = ssDone then begin
+    if not SetIniString('APPLICATION', 'version', '{#MyVersion}', ExpandConstant('{app}\siLAssistent.ini')) then
+      Log('Die installierte Versionsnummer konnte nicht in die lokale INI geschrieben werden.');
+  end;
+end;
+
 function InitializeUninstall(): Boolean;
 var
   Choice, ExitCode: Integer;

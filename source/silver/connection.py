@@ -44,7 +44,7 @@ class SilverConnection:
                         setup=(item if item.is_absolute() else cwd/item).resolve()
                         break
                 ports=sorted({c.laddr.port for c in process.net_connections('tcp') if c.status=='LISTEN' and c.laddr.ip in ('127.0.0.1','::1','0.0.0.0','::')})
-                if setup is not None:matches.append({'pid':process.pid,'path':str(setup),'ports':ports,'home':str(exe.parent.parent),'headless':any(arg.casefold()=='--nogui' for arg in args) or exe.stem.casefold().startswith('silversim')})
+                if setup is not None:matches.append({'pid':process.pid,'path':str(setup),'ports':ports,'home':str(exe.parent.parent),'stopped_launch':any(arg.casefold()=='--stopped' for arg in args),'created':process.create_time(),'api_expected':any(arg.casefold().startswith('--grpc') for arg in args),'headless':any(arg.casefold()=='--nogui' for arg in args) or exe.stem.casefold().startswith('silversim')})
             except (psutil.NoSuchProcess,psutil.AccessDenied,OSError):continue
         return matches
 
@@ -66,7 +66,7 @@ class SilverConnection:
                 except ValueError:pass
             elif line.strip():
                 from datetime import datetime
-                with (Runtime.data_root()/"silver_connection_worker.log").open("a",encoding="utf-8") as log:
+                with (Runtime.log_root()/"silver_connection_worker.log").open("a",encoding="utf-8") as log:
                     log.write(datetime.now().isoformat(timespec="seconds")+" [Silver start] "+line)
         messages.put({'error':'Die Silver-API-Verbindung wurde beendet.','id':None})
 
@@ -101,13 +101,25 @@ class SilverConnection:
         cls.disconnect()
         home=cls.home(existing)
         command=cls.worker_launch_command(home)
-        log=Runtime.data_root()/'silver_connection_worker.log'
+        log=Runtime.log_root()/'silver_connection_worker.log'
         with log.open('a',encoding='utf-8') as errors:
             cls._process=subprocess.Popen(command,cwd=str(path.parent),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=errors,text=True,encoding='utf-8',errors='replace',creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         cls._messages=queue.Queue()
         threading.Thread(target=cls.read_output,args=(cls._process.stdout,cls._messages),daemon=True).start()
         try:
-            result=cls.rpc('connect',timeout=330,cancelled=cancelled,path=str(path),existing=existing,allow_start=allow_start,gui=bool(gui))
+            try:
+                result=cls.rpc('connect',timeout=330,cancelled=cancelled,path=str(path),existing=existing,allow_start=allow_start,gui=bool(gui))
+            except RuntimeError as error:
+                # Explicit Connect only. Auto-connect must never close a user's
+                # instance. The worker first proves that its API is unavailable.
+                if not (allow_start and len(existing)==1 and existing[0].get('stopped_launch') and existing[0].get('api_expected') is False and str(error).startswith('Das Setup ist bereits in Silver geöffnet, wurde aber ohne aktivierte Remote-API gestartet.')):raise
+                if cancelled is not None and cancelled.is_set():raise SilverStartCancelled('Der Setup-Start wurde abgebrochen.')
+                from .no_api_restart import SilverNoApiRestart
+                SilverNoApiRestart.close(existing[0])
+                # Recheck for a simultaneous user launch before starting a copy.
+                remaining=[entry for entry in cls.running_setups() if os.path.normcase(entry['path'])==os.path.normcase(str(path))]
+                if remaining:raise RuntimeError('Das Setup ist inzwischen erneut geöffnet. Bitte erneut verbinden; es wurde keine zweite Instanz gestartet.')
+                result=cls.rpc('connect',timeout=330,cancelled=cancelled,path=str(path),existing=[],allow_start=True,gui=bool(gui))
             if cancelled is not None and cancelled.is_set():
                 cls.abort_start()
                 raise SilverStartCancelled("Der Setup-Start wurde abgebrochen.")

@@ -4,7 +4,7 @@ param(
     [switch]$LocalOnly,
     [switch]$CreateInstaller,
     [string]$PublishDirectory = "",
-    [string]$InstallerCopyDirectory = "\\53.55.34.240\me7work$\Projekte\M286\04_Software_EDL\30_SiL\004_Tools",
+    [string]$InstallerCopyDirectory = "\\smtcft0028prj.rd.corpintra.net\me7work$\Projekte\M286\04_Software_EDL\30_SiL\004_Tools",
     [string]$ISCC = ""
 )
 $ErrorActionPreference = "Stop"
@@ -50,7 +50,7 @@ if ($LASTEXITCODE -ne 0) { throw "Inkonsistente Build-Abhängigkeiten." }
 if ($LASTEXITCODE -ne 0) { throw "Release-Profil stimmt nicht mit dem Lockfile überein." }
 $env:QT_QPA_PLATFORM = "offscreen"
 $env:QT_QPA_FONTDIR = Join-Path $env:WINDIR "Fonts"
-& $Python -B -m pytest tests -q
+& $Python (Join-Path $Root "tools\run_tests.py")
 if ($LASTEXITCODE -ne 0) { throw "Regressionstests fehlgeschlagen." }
 if ($CheckOnly) { exit 0 }
 $Out = Join-Path $Root "build_out"
@@ -162,6 +162,14 @@ if ($CreateInstaller) {
             }
             Move-Item -LiteralPath $TemporaryInstaller -Destination $CopiedInstaller -Force
             Write-Host "Installer auf dem LW abgelegt und SHA-256 geprüft: $CopiedInstaller"
+            # A version announcement alone cannot be installed by existing clients.
+            # Publish the verified path + digest in the default build as well.
+            $ReleaseManifest = Join-Path $InstallerCopyDirectory "ini\siLAssistent_Update.ini"
+            foreach ($UpdateIni in @($ReleaseManifest, (Join-Path $Root "siLAssistent_Update.ini"))) {
+                & $Python (Join-Path $Root "tools\write_release_manifest.py") --output $UpdateIni --version $Version --installer $CopiedInstaller --sha256 $LocalHash
+                if ($LASTEXITCODE -ne 0) { throw "Update-INI konnte nicht vollständig veröffentlicht werden: $UpdateIni" }
+            }
+            Write-Host "Update-Version, Installer-Pfad und SHA-256 lokal und auf dem LW veröffentlicht."
         } finally {
             if (Test-Path -LiteralPath $TemporaryInstaller) { Remove-Item -LiteralPath $TemporaryInstaller }
         }

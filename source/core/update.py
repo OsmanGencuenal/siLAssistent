@@ -1,4 +1,5 @@
 """Read-only share check; launch a locally staged, verified update installer."""
+from .network_share import NetworkShare
 from pathlib import Path
 import configparser
 import hashlib
@@ -6,7 +7,11 @@ import os
 import re
 import shutil
 import tempfile
+import stat
 from .errors import AssistantError
+
+class UpdateCancelled(AssistantError):
+    pass
 
 class UpdateManager:
     @classmethod
@@ -22,7 +27,7 @@ class UpdateManager:
             return {"available": False, "configured": False}
         parser = configparser.ConfigParser(interpolation=None)
         path = Path(ini_path)
-        raw = path.read_bytes()
+        raw = NetworkShare.read_bytes(path)
         for encoding in ("utf-8-sig", "cp1252"):
             try:
                 text = raw.decode(encoding)
@@ -31,11 +36,12 @@ class UpdateManager:
                 continue
         parser.read_string(text)
         from .config import Config
+        Config.initialize_setup_counter(parser)
         Config.sync_update_paths(parser)
         Config.sync_support_mail(parser)
         section = parser["UPDATE"]
         latest = section["latest_version"].strip()
-        installer = section.get("installer_path", "").strip()
+        installer = Config.network_path(section.get("installer_path", "").strip())
         if installer and not Path(installer).is_absolute():
             installer = str(path.parent / installer)
         return {"available": cls.version_tuple(latest) > cls.version_tuple(installed),
@@ -45,13 +51,17 @@ class UpdateManager:
                 "sha256": section.get("sha256", "").strip().lower()}
 
     @classmethod
-    def stage(cls, release, directory=None, progress=None):
+    def stage(cls, release, directory=None, progress=None, cancelled=None):
+        cls.check_cancelled(cancelled)
+        if progress:progress("Update ... Verbindung zum Laufwerk wird hergestellt …",None)
         source = Path(release["installer_path"])
-        if not source.is_file() or source.suffix.lower() != ".exe":
+        with NetworkShare.access(source):metadata=source.stat()
+        if not stat.S_ISREG(metadata.st_mode) or source.suffix.lower() != ".exe":
             raise AssistantError(f"Update installer not found: {source}")
         digest = release.get("sha256", "")
         if not re.fullmatch(r"[a-f0-9]{64}", digest):
             raise AssistantError("Release INI must contain the installer's SHA-256 before installation.")
+        if progress:progress("Update ... Installer wird vorbereitet …",None)
         directory = Path(directory or tempfile.mkdtemp(prefix="siLAssistent_update_"))
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / "siLAssistent_Installer.exe"
@@ -59,21 +69,26 @@ class UpdateManager:
             raise AssistantError("Update staging target must differ from the release source.")
         temporary = target.with_suffix(".partial")
         try:
-            total=source.stat().st_size;copied=0
-            if progress:progress("Update wird lokal kopiert …",0)
-            with source.open("rb") as incoming,temporary.open("wb") as outgoing:
-                while chunk:=incoming.read(1024*1024):
+            total=metadata.st_size;copied=0
+            if progress:progress("Update ... Installer wird vom Laufwerk angefordert …",None)
+            cls.check_cancelled(cancelled)
+            with temporary.open("wb") as outgoing:
+                for chunk in NetworkShare.chunks(source):
+                    cls.check_cancelled(cancelled)
                     outgoing.write(chunk);copied+=len(chunk)
-                    if progress:progress("Update wird lokal kopiert …",int(80*copied/max(total,1)))
+                    if progress:progress(f"Update ... {copied/1048576:.1f} von {total/1048576:.1f} MB übertragen",round(80*copied/max(total,1),1))
+                if progress:progress("Update ... Lokale Datei wird fertig gespeichert …",None)
                 outgoing.flush();os.fsync(outgoing.fileno())
             checksum=hashlib.sha256();verified=0
             with temporary.open("rb") as stream:
                 while chunk:=stream.read(1024*1024):
+                    cls.check_cancelled(cancelled)
                     checksum.update(chunk);verified+=len(chunk)
-                    if progress:progress("Installer-Prüfsumme wird geprüft …",80+int(20*verified/max(total,1)))
+                    if progress:progress("Installer-Prüfsumme wird geprüft …",round(80+20*verified/max(total,1),1))
             calculated=checksum.hexdigest()
             if calculated != digest:
                 raise AssistantError("Update installer checksum mismatch")
+            cls.check_cancelled(cancelled)
             os.replace(temporary, target)
             if progress:progress("Update ist vorbereitet und geprüft.",100)
         finally:
@@ -81,13 +96,16 @@ class UpdateManager:
         return target
 
     @classmethod
-    def launch(cls, installer, launcher=None):
+    def launch(cls, installer, launcher=None, foreground=False):
         path = Path(installer).resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
         if launcher is not None:
             launcher(str(path))
         elif os.name == "nt":
+            if foreground:
+                from .installer_foreground import InstallerForeground
+                return InstallerForeground.launch(path)
             os.startfile(str(path))
         else:
             raise AssistantError("Windows installer launch requires Windows")
@@ -101,9 +119,12 @@ class UpdateManager:
         command=[sys.executable]
         if not Runtime.is_compiled():command.append(str(Runtime.project_root()/"source/siLAssistent.py"))
         command += ["--apply-update",str(target),"--wait-for-pid",str(os.getpid()),"--wait-for-created",str(psutil.Process().create_time())]
-        log=Runtime.data_root()/"update_install.log"
+        log=Runtime.log_root()/"update_install.log"
         with log.open("a",encoding="utf-8") as stream:
-            return subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=stream,stderr=stream,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+            worker=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=stream,stderr=stream,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+        from .installer_foreground import InstallerForeground
+        InstallerForeground.allow(worker.pid)
+        return worker
 
     @classmethod
     def apply_after_exit(cls,installer,pid,created):
@@ -114,7 +135,7 @@ class UpdateManager:
         except psutil.NoSuchProcess:pass
         except psutil.TimeoutExpired as error:
             raise AssistantError("Die bisherige Anwendung wurde nicht beendet; das Update wurde nicht gestartet.") from error
-        cls.launch(installer)
+        cls.launch(installer,foreground=True)
         return 0
 
     @classmethod
@@ -127,7 +148,7 @@ class UpdateManager:
         parser = configparser.ConfigParser(interpolation=None)
         parser.optionxform = str
         if path.exists():
-            raw = path.read_bytes()
+            raw = NetworkShare.read_bytes(path)
             try:
                 text = raw.decode("utf-8-sig")
             except UnicodeDecodeError:
@@ -155,3 +176,8 @@ class UpdateManager:
             section[key] = value
         path.parent.mkdir(parents=True, exist_ok=True)
         Config.write(path, parser)
+
+    @classmethod
+    def check_cancelled(cls,cancelled):
+        if cancelled is not None and cancelled.is_set():
+            raise UpdateCancelled("Manuelle Installation gewählt. Automatisches Update abgebrochen.")

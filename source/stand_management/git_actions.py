@@ -21,6 +21,8 @@ class GitActions:
             raise RuntimeError("Bitte zuerst eine gültige Git User Lizenz bestätigen.")
         access=GitTool.repository_check(GitTool.windows_user()["username"])
         if access.get("status")=="git_missing":raise GitMissing("Git ist nicht mehr installiert.")
+        if access.get("status") in ("authentication_required","authentication_or_access_required","unverified"):
+            raise RuntimeError(access.get("reason","GitHub-Anmeldung bzw. Repo-Zugriff noch nicht bestätigt. Bitte die Anmeldung im Git-Fenster prüfen; ein neuer Repo-Antrag ist dafür nicht automatisch erforderlich."))
         if access.get("status") in ("git_error","unavailable"):
             raise RuntimeError(access.get("reason","Git konnte den Server nicht erreichen. Bitte Netzwerk und Git-Anmeldung prüfen."))
         if not access["allowed"]:

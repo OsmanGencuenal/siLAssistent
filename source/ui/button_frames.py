@@ -1,29 +1,53 @@
 """Colour-matched button frames, applied as buttons become visible."""
 import re
+import shiboken6
 from PySide6.QtCore import QObject,QEvent
 from PySide6.QtGui import QColor,QPalette
-from PySide6.QtWidgets import QApplication,QPushButton,QToolButton
+from PySide6.QtWidgets import QApplication,QPushButton,QToolButton,QMessageBox
 
 class ButtonFrames(QObject):
     _filter=None
     _counter=0
+    _decorating=False
 
     @classmethod
     def install(cls):
         app=QApplication.instance()
-        if app is not None and cls._filter is None:
+        from .responsive_buttons import ResponsiveButtons
+        ResponsiveButtons.install()
+        if app is not None and (cls._filter is None or not shiboken6.isValid(cls._filter)):
             cls._filter=QObject(app)
             cls._filter.eventFilter=lambda watched,event:cls.filter_event(watched,event)
             app.installEventFilter(cls._filter)
+            app.aboutToQuit.connect(cls.uninstall)
+
+    @classmethod
+    def uninstall(cls):
+        app=QApplication.instance()
+        if app is not None and cls._filter is not None and shiboken6.isValid(cls._filter):
+            app.removeEventFilter(cls._filter)
+        cls._filter=None
 
     @classmethod
     def filter_event(cls,watched,event):
-        if event.type()==QEvent.Type.Show and isinstance(watched,(QPushButton,QToolButton)):
-            cls.decorate(watched)
+        if cls._decorating or event.type()!=QEvent.Type.Show:return False
+        if not shiboken6.isValid(watched):return False
+        if isinstance(watched,QMessageBox):
+            cls._decorating=True
+            try:
+                from .dialog_button_accent import DialogButtonAccent
+                DialogButtonAccent.apply(watched)
+            finally:cls._decorating=False
+            return False
+        if not isinstance(watched,(QPushButton,QToolButton)):return False
+        cls._decorating=True
+        try:cls.decorate(watched)
+        finally:cls._decorating=False
         return False
 
     @classmethod
     def decorate(cls,button):
+        if not shiboken6.isValid(button):return
         if button.text().strip()=="Launcher" and not button.property("launcherButtonStyle"):
             from .button_gradients import ButtonGradients
             ButtonGradients.launcher(button)

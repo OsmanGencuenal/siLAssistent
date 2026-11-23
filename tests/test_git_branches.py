@@ -29,8 +29,8 @@ class GitBranchTests(unittest.TestCase):
         with patch.object(Config,"state",return_value={"GitUserLicenceState":True}), patch.object(Config,"set_state"), patch.object(GitTool,"repository_check",return_value={"allowed":True}), patch.object(GitBranches,"validate",return_value=root), patch.object(GitBranches,"switch_plan",return_value=[(root,True),(root/"ECM",False),(root/"ECM"/"nested",True)]), patch.object(GitBranches,"list",return_value=final), patch.object(GitBranches,"run",return_value=Mock(stdout="devAGK\n")) as run:
             result=GitBranches.activate(root,"devAGK","user")
             commands=[call.args[1] for call in run.call_args_list]
-            assert commands.count(["switch","--no-recurse-submodules","--no-guess","--","devAGK"])==2
-            assert ["switch","--no-recurse-submodules","--track","-c","devAGK","origin/devAGK"] in commands
+            assert commands.count(["switch","--no-recurse-submodules","--no-overwrite-ignore","--no-guess","--","devAGK"])==2
+            assert ["switch","--no-recurse-submodules","--no-overwrite-ignore","--track","-c","devAGK","origin/devAGK"] in commands
             assert not any("push" in command for command in commands)
             assert not any("update" in command or "--force" in command for command in commands)
             assert result["submodule_count"]==2

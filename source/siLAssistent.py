@@ -17,6 +17,8 @@ class Application:
         parser.add_argument("--wait-for-created",type=float,help=argparse.SUPPRESS)
         parser.add_argument("--export-user-config",help=argparse.SUPPRESS)
         parser.add_argument("--uninstall",help=argparse.SUPPRESS)
+        parser.add_argument("--silver-ui-worker",type=int,help=argparse.SUPPRESS)
+        parser.add_argument("--silver-ui-created",type=float,help=argparse.SUPPRESS)
         parser.add_argument("--silver-api-worker",help=argparse.SUPPRESS)
         parser.add_argument("--silver-api-worker-test",help=argparse.SUPPRESS)
         parser.add_argument("--self-test", metavar="RESULT_JSON")
@@ -35,8 +37,10 @@ class Application:
             try:
                 if args.wait_for_pid is None or args.wait_for_created is None:raise ValueError("Update-Prozessangaben fehlen.")
                 return UpdateManager.apply_after_exit(args.apply_update,args.wait_for_pid,args.wait_for_created)
-            except Exception:
+            except Exception as error:
                 Runtime.configure_logging().exception("Update installer could not be started")
+                from source.ui.update_recovery import UpdateRecovery
+                UpdateRecovery.notice(error=error)
                 return 1
         if args.export_user_config or args.uninstall:
             from source.core.uninstall import Uninstall
@@ -52,6 +56,10 @@ class Application:
                     app=QApplication.instance() or QApplication([])
                     Dialogs.message("Deinstallation konnte nicht gestartet werden",str(error))
                 return 1
+        if args.silver_ui_worker is not None:
+            if args.silver_ui_created is None:raise ValueError("UI-Automation-Prozessidentität fehlt.")
+            from source.silver.ui_worker import SilverUiWorker
+            return SilverUiWorker.main(args.silver_ui_worker,args.silver_ui_created)
         if args.silver_api_worker or args.silver_api_worker_test:
             from source.silver.connection_worker import SilverConnectionWorker
             if args.silver_api_worker_test:return SilverConnectionWorker.self_test(args.silver_api_worker_test)

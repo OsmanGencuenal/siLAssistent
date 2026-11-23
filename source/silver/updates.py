@@ -1,4 +1,5 @@
 """Silver release checks and consent-driven replacement using registered uninstallers."""
+from ..core.network_share import NetworkShare
 from pathlib import Path
 import configparser
 import ctypes
@@ -29,7 +30,7 @@ class SilverUpdates:
     def release(cls, ini_path=None):
         path = Path(ini_path or Config.load()["update_ini_path"])
         parser = configparser.ConfigParser(interpolation=None)
-        raw = path.read_bytes()
+        raw = NetworkShare.read_bytes(path)
         try:
             text = raw.decode("utf-8-sig")
         except UnicodeDecodeError:
@@ -172,7 +173,7 @@ class SilverUpdates:
               "recorded_version":state["InstalledSilverVersion"],"offered_version":release["version"],
               "registered_installations":entries,"local_executables":files}
         try:
-            (Runtime.data_root()/"silver_version_diagnose.json").write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
+            (Runtime.log_root()/"silver_version_diagnose.json").write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
         except OSError:
             pass
 

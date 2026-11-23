@@ -20,7 +20,7 @@ class GitCloneTests(unittest.TestCase):
             assert target.parent.is_dir()
             assert "--recurse-submodules" in run.call_args.args[0]
             assert "switch" not in run.call_args.args[0]
-            assert "--branch" not in run.call_args.args[0]
+            assert run.call_args.args[0][run.call_args.args[0].index("--branch")+1]=="main"
             assert "devAGK" not in run.call_args.args[0]
             assert result["path"]==str(target.resolve())
 

@@ -8,8 +8,8 @@ from .runtime import Runtime
 from . import build_settings
 
 class Config:
-    UPDATE_INI = r"\\53.55.34.240\me7work$\Projekte\M286\04_Software_EDL\30_SiL\004_Tools\ini\siLAssistent_Update.ini"
-    LEGACY_UPDATE_INI = r"\\53.55.34.240\me7work$\Projekte\M286\04_Software_EDL\30_SiL\004_Tools\siLAssistent_Update.ini"
+    UPDATE_INI = r"\\smtcft0028prj.rd.corpintra.net\me7work$\Projekte\M286\04_Software_EDL\30_SiL\004_Tools\ini\siLAssistent_Update.ini"
+    LEGACY_UPDATE_INI = r"\\smtcft0028prj.rd.corpintra.net\me7work$\Projekte\M286\04_Software_EDL\30_SiL\004_Tools\siLAssistent_Update.ini"
     STATE_SECTION = "STATE"
     USER_SECTION = "USER"
     PATH_SECTION = "PATH"
@@ -20,8 +20,8 @@ class Config:
         "SetupAutoConnect": "False",
         "SetupHeadless": "False",
         "SetupExitNow": "False",
-        "FlashFilesGrouped": "False",
-        "silSetupPath": '\\\\53.55.34.240\\me7work$\\Projekte\\M286\\04_Software_EDL\\30_SiL\\000_SiL_Setup\\SimFiles',
+        "FlashFilesGrouped": "True",
+        "silSetupPath": '\\\\smtcft0028prj.rd.corpintra.net\\me7work$\\Projekte\\M286\\04_Software_EDL\\30_SiL\\000_SiL_Setup\\SimFiles',
         "silSetupVersionCounter": "0",
         "DriveSetupLocalPath": "",
         "GitUserLicenceState": "False",
@@ -30,12 +30,20 @@ class Config:
         "GitInstallationState": "False",
         "InstalledSilverVersion": "",
         "GitLocalRepoPath": "",
-        "GitInstallationPath": r"\\53.55.34.240\me7work$\Projekte\M286\04_Software_EDL\30_SiL\Silver_Software\_tools\Git-2.56.0.4-64-bit.exe",
+        "GitInstallationPath": r"\\smtcft0028prj.rd.corpintra.net\me7work$\Projekte\M286\04_Software_EDL\30_SiL\Silver_Software\_tools\Git-2.56.0.4-64-bit.exe",
         "GitSetupRepo": "https://mercedes-benz.ghe.com/devM286/SimFiles.git",
-        "silverInstallerPath": r"\\53.55.34.240\me7work$\Projekte\M286\04_Software_EDL\30_SiL\Silver_Software\SilverSetup_Y-2026.03-1.exe",
+        "silverInstallerPath": r"\\smtcft0028prj.rd.corpintra.net\me7work$\Projekte\M286\04_Software_EDL\30_SiL\Silver_Software\SilverSetup_Y-2026.03-1.exe",
     }
     STATE_DEFAULTS.update(build_settings.RELEASE_PATHS)
     BOOLEAN_STATES = frozenset(("GitUserLicenceState", "GitUserState", "JiraUserState", "GitInstallationState", "SetupAutoConnect", "SetupHeadless", "SetupExitNow", "FlashFilesGrouped"))
+
+    @classmethod
+    def network_path(cls,value):
+        # Migrate the former IP alias, including existing user INIs.
+        old="53.55."+"34.240"
+        if isinstance(value,str) and value.startswith("\\\\"):
+            return value.replace(old,"smtcft0028prj.rd.corpintra.net",1) if value.lstrip("\\").split("\\",1)[0]==old else value
+        return value
 
     @classmethod
     def section_for(cls, key):
@@ -50,7 +58,8 @@ class Config:
         parser = configparser.ConfigParser(interpolation=None)
         parser.optionxform = str
         if path.exists():
-            parser.read_string(path.read_text(encoding="utf-8-sig"))
+            from .network_share import NetworkShare
+            parser.read_string(NetworkShare.read_bytes(path).decode("utf-8-sig"))
         return parser
 
     @classmethod
@@ -97,8 +106,14 @@ class Config:
     def ensure_state(cls, path=None):
         path = Path(path) if path is not None else cls.path()
         with cls.locked(path):
+            fresh=not path.exists()
             parser = cls.parser(path)
             changed = False
+            for section in parser.sections():
+                for key,value in list(parser.items(section)):
+                    normalized=cls.network_path(value)
+                    if normalized!=value:
+                        parser.set(section,key,normalized);changed=True
             for section in parser.sections():
                 for obsolete in ("TortoiseGitState", "UpdateState"):
                     if parser.remove_option(section,obsolete):
@@ -117,6 +132,8 @@ class Config:
                 changed = True
             if not parser.has_section("APPLICATION"):
                 parser.add_section("APPLICATION");changed=True
+            if fresh:
+                parser.set("APPLICATION","setup_counter_initialization_pending","True");changed=True
             if not parser.has_option("APPLICATION","supportMail"):
                 parser.set("APPLICATION","supportMail",build_settings.SUPPORT_MAIL or "");changed=True
             if build_settings.SUPPORT_MAIL:
@@ -187,7 +204,7 @@ class Config:
         path = cls.ensure_state(path)
         with cls.locked(path):
             parser = cls.parser(path)
-            parser.set(cls.section_for(key), key, value)
+            parser.set(cls.section_for(key), key, cls.network_path(value))
             cls.write(path, parser)
 
     @classmethod
@@ -211,11 +228,33 @@ class Config:
                 local.set("APPLICATION","supportMail",value);cls.write(destination,local)
 
     @classmethod
+    def initialize_setup_counter(cls,release,path=None):
+        # No share access here: use the manifest already read by the update
+        # worker. Offline first starts remain pending until a successful read.
+        if not release.has_option('UPDATE','silSetupVersionCounter'):return False
+        counter=release.getint('UPDATE','silSetupVersionCounter')
+        if counter<0:raise ValueError('Ungültiger Setup-Counter auf dem Laufwerk.')
+        destination=cls.ensure_state(path)
+        with cls.locked(destination):
+            local=cls.parser(destination)
+            if not local.getboolean('APPLICATION','setup_counter_initialization_pending',fallback=False):return False
+            has_setup=any(local.get('PATH',key,fallback='').strip() for key in ('GitLocalRepoPath','DriveSetupLocalPath'))
+            previous=local.get('STATE','silSetupVersionCounter',fallback='0').strip()
+            initialized=not has_setup and previous=='0'
+            if initialized:local.set('STATE','silSetupVersionCounter',str(counter))
+            local.set('APPLICATION','setup_counter_initialization_pending','False')
+            cls.write(destination,local)
+            if initialized:
+                import logging
+                logging.getLogger('siLAssistent').info('Setup-Zähler bei Erstinitialisierung übernommen: %s',counter)
+            return initialized
+
+    @classmethod
     def export_installation_config(cls, destination, paths=None, support_mail=None):
         """Ship pristine state defaults, never the developer machine's flags."""
         parser = configparser.ConfigParser(interpolation=None)
         parser.optionxform = str
-        parser["APPLICATION"] = {"update_ini_path":cls.UPDATE_INI,"inca_prog_id":"INCA.INCA"}
+        parser["APPLICATION"] = {"update_ini_path":cls.UPDATE_INI,"inca_prog_id":"INCA.INCA","setup_counter_initialization_pending":"True"}
         parser[cls.STATE_SECTION] = {key:value for key,value in cls.STATE_DEFAULTS.items() if key not in cls.USER_KEYS|cls.PATH_KEYS}
         parser[cls.USER_SECTION] = {key:value for key,value in cls.STATE_DEFAULTS.items() if key in cls.USER_KEYS}
         parser[cls.PATH_SECTION] = {key:value for key,value in cls.STATE_DEFAULTS.items() if key in cls.PATH_KEYS}
@@ -230,8 +269,8 @@ class Config:
     def load(cls, path=None):
         parser = configparser.ConfigParser(interpolation=None)
         parser.read(path or Runtime.project_root() / "siLAssistent.ini", encoding="utf-8-sig")
-        return {"update_ini_path": os.environ.get("SILASSISTENT_UPDATE_INI") or
-                parser.get("APPLICATION", "update_ini_path", fallback=cls.UPDATE_INI),
+        return {"update_ini_path": cls.network_path(os.environ.get("SILASSISTENT_UPDATE_INI") or
+                parser.get("APPLICATION", "update_ini_path", fallback=cls.UPDATE_INI)),
                 "silver_home": parser.get("APPLICATION", "silver_home", fallback=""),
                 "inca_prog_id": parser.get("APPLICATION", "inca_prog_id", fallback="INCA.INCA")}
 

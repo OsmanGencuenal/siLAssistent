@@ -100,8 +100,9 @@ class GitTool:
             Config.set_state("GitInstallationState",True)
         repo = cls.repository_url()
         env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", GIT_ASKPASS="", SSH_ASKPASS="")
+        from .git_credential_manager import GitCredentialManager
         try:
-            result = subprocess.run([git, "-c", "credential.interactive=never", "ls-remote", repo],
+            result = subprocess.run([git, *GitCredentialManager.options(git), "-c", "credential.interactive=never", "ls-remote", repo],
                                     capture_output=True, timeout=40, env=env,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except FileNotFoundError:
@@ -149,7 +150,9 @@ class GitTool:
         env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", GIT_ASKPASS="", SSH_ASKPASS="")
         try:
             target.parent.mkdir(parents=True,exist_ok=True)
-            result = subprocess.run([GitInstallation.executable(), "-c", "credential.interactive=never", "clone", "--recurse-submodules", "--", cls.repository_url(), str(target)],
+            from .git_credential_manager import GitCredentialManager
+            git=GitInstallation.executable()
+            result = subprocess.run([git, *GitCredentialManager.options(git), "-c", "credential.interactive=never", "clone", "--branch", "main", "--recurse-submodules", "--", cls.repository_url(), str(target)],
                                     capture_output=True, timeout=1800, env=env,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except subprocess.TimeoutExpired:
@@ -158,7 +161,9 @@ class GitTool:
             raise RuntimeError("Der Zielordner konnte nicht angelegt oder Git nicht gestartet werden. Bitte Schreibrechte, Speicherplatz und Git-Installation prüfen.") from None
         if result.returncode != 0:
             failure=cls.git_failure(result)
-            if failure["status"]!="unverified":return failure
+            if failure["status"]!="unverified":
+                failure["incomplete_path"]=str(target)
+                return failure
             raise RuntimeError("Klonen fehlgeschlagen. Anmeldung, Netzwerk und Zielordner prüfen. Ein unvollständiger Ordner kann vorhanden sein.")
         return {"allowed": True, "status": "cloned", "path": str(target.resolve())}
 
@@ -167,10 +172,16 @@ class GitTool:
         output=getattr(result,"stderr","")
         output=output.decode("utf-8",errors="replace") if isinstance(output,bytes) else output if isinstance(output,str) else ""
         text=output.casefold()
+        if "not a git command" in text and "credential-manager" in text:
+            return {"allowed":False,"status":"git_error","reason":"Git Credential Manager fehlt oder ist nicht korrekt eingerichtet. Bitte Git einschließlich Credential Manager reparieren."}
+        if any(word in text for word in ("user canceled", "user cancelled", "operation was canceled", "authentication canceled", "authentication cancelled")):
+            return {"allowed":False,"status":"cancelled","reason":"Die GitHub-Anmeldung wurde abgebrochen."}
         if any(word in text for word in ("could not resolve", "failed to connect", "timed out", "ssl certificate", "connection reset", "network is unreachable")):
             return {"allowed":False,"status":"unavailable","reason":"Git erreicht den Server nicht. Bitte Netzwerk, VPN, Proxy und Zertifikate prüfen. Das ist kein Nachweis fehlender Repo-Rechte."}
-        if any(word in text for word in ("authentication failed", "could not read username", "terminal prompts disabled", "invalid username or password")):
+        if any(word in text for word in ("authentication failed", "could not read username", "could not read password", "terminal prompts disabled", "invalid username or password", "interactivity has been disabled", "interactive prompts have been disabled", "user interaction has been disabled", "cannot prompt", "http 401", "error: 401")):
             return {"allowed":False,"status":"authentication_required","reason":"Git konnte die Anmeldung nicht bestätigen. Bitte die GitHub-Anmeldung für das verwendete Konto prüfen. Eine neue Lizenz ist dafür nicht automatisch erforderlich."}
         if any(word in text for word in ("403", "access denied", "permission to ", "not authorized", "you are not allowed")):
             return {"allowed":False,"status":"access_denied","reason":"Der Server verweigert den Repository- oder Submodul-Zugriff. Bitte Repo-Berechtigung und gegebenenfalls SSO-Freigabe prüfen."}
+        if "repository not found" in text or "requested url returned error: 404" in text:
+            return {"allowed":False,"status":"authentication_or_access_required","reason":"Git kann das private Repository noch nicht sehen. Eine fehlende oder abgelaufene Anmeldung und fehlende Repo-Rechte sind hier noch nicht unterscheidbar."}
         return {"allowed":False,"status":"unverified"}

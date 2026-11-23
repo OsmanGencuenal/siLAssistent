@@ -13,6 +13,9 @@ class SilverConnectionWorker:
     remote=None
     DISCOVERY_TIMEOUT=120
     READY_TIMEOUT=180
+    _pedal_names=None
+    _pedal_target=None
+    PEDAL_NAMES=("pos_BrakePedal_const","pos_AcceleratorPedal_const")
 
     @classmethod
     def load(cls,home):
@@ -27,17 +30,7 @@ class SilverConnectionWorker:
         path=str(Path(request['path']).resolve())
         candidates=request.get('existing',[])
         if candidates:
-            # Never start a second copy of an already recognized setup.
-            for candidate in candidates:
-                for port in candidate['ports']:
-                    api=cls.grpc_api.SilverApi(int(port))
-                    try:
-                        cls.grpc.channel_ready_future(api.channel).result(timeout=1)
-                        cls.target=api
-                        return {'path':path,'reused':True,'pid':candidate['pid'],'headless':bool(candidate.get('headless',False))}
-                    except Exception:pass
-                    api.channel.close()
-            raise RuntimeError('Das ausgewählte Setup ist bereits geöffnet, aber seine Remote-API ist nicht erreichbar. Bitte diese Silver-Instanz schließen und über Verbinden/ Starten erneut öffnen. Es wurde keine zweite Instanz gestartet.')
+            return cls.reuse_existing(path,candidates)
         if not request.get('allow_start',True):raise RuntimeError('Das ausgewählte Setup ist nicht geöffnet.')
         if cls.remote is None:
             import remotesilverapi
@@ -47,6 +40,60 @@ class SilverConnectionWorker:
         cls.target=target
         cls.wait_for_ready(target)
         return {'path':path,'reused':False,'pid':target._silver_process.pid,'headless':not bool(request.get('gui',True))}
+
+    @classmethod
+    def existing_ports(cls,candidate):
+        try:import psutil
+        except ModuleNotFoundError:
+            # The vendor Python used in development does not ship psutil.
+            # The parent already obtained these process-scoped listener ports.
+            return candidate.get('ports',[])
+        process=psutil.Process(candidate['pid'])
+        created=candidate.get('created')
+        if created is not None and abs(process.create_time()-created)>.01:
+            raise RuntimeError("Der erkannte Silver-Prozess wurde inzwischen ersetzt. Bitte erneut verbinden.")
+        return sorted({item.laddr.port for item in process.net_connections('tcp')
+                       if item.status=='LISTEN' and item.laddr.ip in ('127.0.0.1','::1','0.0.0.0','::')})
+
+    @classmethod
+    def reuse_existing(cls,path,candidates):
+        # Ports captured by the GUI may predate the scripting server. Refresh
+        # only the identified Silver processes; never launch/close user setups.
+        started=time.monotonic()
+        retry=any(item.get('api_expected',False) for item in candidates)
+        deadline=started+(min(cls.DISCOVERY_TIMEOUT,30) if retry else 0)
+        last_error=None
+        while True:
+            for candidate in candidates:
+                try:ports=cls.existing_ports(candidate)
+                except Exception as error:
+                    last_error=str(error);ports=[]
+                cls.diagnostic(f"Attach: pid={candidate['pid']}, api_expected={candidate.get('api_expected')}, ports={ports}")
+                for port in ports:
+                    api=None
+                    try:
+                        api=cls.grpc_api.SilverApi(int(port))
+                        cls.grpc.channel_ready_future(api.channel).result(timeout=1)
+                        # A TCP/HTTP2 listener alone does not prove this is the
+                        # scripting API. Read-only RPC, with a hard deadline.
+                        api._simulation_control.StartedSuccessfully(cls.grpc_api.Empty(),timeout=2)
+                        cls.target=api
+                        cls.diagnostic(f"Attached: pid={candidate['pid']}, port={port}, elapsed={time.monotonic()-started:.1f}s")
+                        return {'path':path,'reused':True,'pid':candidate['pid'],'headless':bool(candidate.get('headless',False))}
+                    except Exception as error:
+                        last_error=f"Port {port}: {type(error).__name__}: {error}"
+                        if api is not None:api.channel.close()
+            if time.monotonic()>=deadline:break
+            time.sleep(.25)
+        cls.diagnostic("Attach failed: "+str(last_error))
+        if all(item.get('api_expected') is False for item in candidates):
+            raise RuntimeError("Das Setup ist bereits in Silver geöffnet, wurde aber ohne aktivierte Remote-API gestartet. "
+                               "Diese Instanz kann das Tool deshalb nicht steuern. Bitte den aktuellen Stand in Silver speichern, "
+                               "diese Silver-Instanz schließen und im Tool Setup :: Verbinden/Starten anklicken. "
+                               "Dabei wird die Remote-API automatisch aktiviert. Es wurde keine zweite Instanz gestartet.")
+        raise RuntimeError("Das Setup ist bereits geöffnet, seine Remote-API wurde aber auch nach erneuter Prüfung nicht erreichbar. "
+                           "Bitte Lade- oder Lizenzmeldungen in Silver prüfen und erneut verbinden. Details: silver_connection_worker.log. "
+                           "Es wurde keine zweite Instanz gestartet.")
 
     @classmethod
     def wait_for_ready(cls,target):
@@ -113,7 +160,7 @@ class SilverConnectionWorker:
 
     @classmethod
     def launch_silver(cls,command,*args,**kwargs):
-        log_root=Path(os.environ.get("LOCALAPPDATA") or Path.home())/"siLAssistent"
+        log_root=Path(os.environ.get("LOCALAPPDATA") or Path.home())/"siLAssistent"/"Logs"
         log_root.mkdir(parents=True,exist_ok=True)
         kwargs["creationflags"]=kwargs.get("creationflags",0)|getattr(subprocess,"CREATE_NO_WINDOW",0)
         kwargs["env"]=cls.external_environment()
@@ -122,6 +169,22 @@ class SilverConnectionWorker:
             kwargs["stdout"]=log;kwargs["stderr"]=log
             # Nuitka's DLL directory must not be inherited by another Qt application.
             with cls.external_dll_search():return subprocess.Popen(command,*args,**kwargs)
+
+    @classmethod
+    def pedal_name(cls,name):
+        prefix="mapping.mdl."
+        short=name.removeprefix(prefix)
+        if short not in cls.PEDAL_NAMES:return name
+        if cls._pedal_target is not cls.target:
+            cls._pedal_target=cls.target;cls._pedal_names=None
+        if cls._pedal_names is None:
+            # _const names may carry either variable or parameter flags.
+            # Inspect names instead of probing values: zero/None is not absence.
+            names=set(cls.target.get_variable_names())|set(cls.target.get_parameter_names())
+            resolved={key:key if key in names else prefix+key for key in cls.PEDAL_NAMES}
+            if names:cls._pedal_names=resolved
+            return resolved[short]
+        return cls._pedal_names[short]
 
     @classmethod
     def dispatch(cls,request):
@@ -137,7 +200,12 @@ class SilverConnectionWorker:
         if operation=='call':
             method=request['method']
             if not method.isidentifier() or method.startswith('_'):raise ValueError('Ungültige API-Methode.')
-            args=request.get('args',[]);kwargs=request.get('kwargs',{})
+            args=list(request.get('args',[]));kwargs=dict(request.get('kwargs',{}))
+            if method in ('reload','open','clear','stop'):
+                cls._pedal_names=None
+            if method in ('get_variable_value','set_variable_value'):
+                if args:args[0]=cls.pedal_name(args[0])
+                elif 'variable_name' in kwargs:kwargs['variable_name']=cls.pedal_name(kwargs['variable_name'])
             if method=='set_variable_value':
                 name=args[0] if args else kwargs['variable_name']
                 value=args[1] if len(args)>1 else kwargs.get('value')

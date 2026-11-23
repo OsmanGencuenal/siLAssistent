@@ -71,8 +71,10 @@ def test_stage_reports_real_copy_and_hash_progress(tmp_path):
     progress=[]
     target=UpdateManager.stage(release,tmp_path/"stage",progress=lambda text,value:progress.append((text,value)))
     assert target.read_bytes()==source.read_bytes()
-    assert progress[0][1]==0 and progress[-1][1]==100
-    assert [value for _,value in progress]==sorted(value for _,value in progress)
+    assert progress[0][1] is None and progress[-1][1]==100
+    measured=[value for _,value in progress if value is not None]
+    assert measured==sorted(measured)
+    assert any("MB übertragen" in text for text,_ in progress)
     assert any("Prüfsumme" in text for text,_ in progress)
 
 
@@ -80,7 +82,7 @@ def test_update_installer_waits_for_exact_parent_to_exit():
     from unittest.mock import patch
     events=[];parent=Mock();parent.create_time.return_value=42
     parent.wait.side_effect=lambda **kwargs:events.append("parent exited")
-    with patch("psutil.Process",return_value=parent),patch.object(UpdateManager,"launch",side_effect=lambda path:events.append("installer started")):
+    with patch("psutil.Process",return_value=parent),patch.object(UpdateManager,"launch",side_effect=lambda path,**kwargs:events.append("installer started")):
         assert UpdateManager.apply_after_exit("installer.exe",123,42)==0
     assert events==["parent exited","installer started"]
 
@@ -107,3 +109,18 @@ def test_update_dialog_has_orange_bar_and_actual_percentage():
             Launcher.update_progress("Anwendung wird beendet …",None)
             assert dialog._bar.maximum()==0
         finally:Launcher.finish_update_progress();app.processEvents()
+
+
+def test_initial_status_is_reported_before_potentially_slow_network_access(tmp_path):
+    from unittest.mock import patch
+    source=tmp_path/"published.exe";source.write_bytes(b"installer")
+    release=dict(installer_path=str(source),sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    events=[];original=Path.stat
+    def check(path,*args,**kwargs):
+        if path==source:
+            assert events and events[0][1] is None
+            assert "Laufwerk" in events[0][0]
+        return original(path,*args,**kwargs)
+    with patch.object(Path,"stat",check):
+        UpdateManager.stage(release,tmp_path/"stage",progress=lambda text,value:events.append((text,value)))
+    assert events[-1][1]==100

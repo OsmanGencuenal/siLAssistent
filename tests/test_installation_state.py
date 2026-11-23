@@ -11,7 +11,7 @@ class InstallationStateTests(unittest.TestCase):
         expected = {"GitUserState": "False", "JiraUserState": "False", "GitInstallationState": "False",
                     "InstalledSilverVersion": "",
                     "GitSetupRepo": "https://mercedes-benz.ghe.com/devM286/SimFiles.git",
-                    "silverInstallerPath": r"\\53.55.34.240\me7work$\Projekte\M286\04_Software_EDL\30_SiL\Silver_Software\SilverSetup_Y-2026.03-1.exe"}
+                    "silverInstallerPath": r"\\smtcft0028prj.rd.corpintra.net\me7work$\Projekte\M286\04_Software_EDL\30_SiL\Silver_Software\SilverSetup_Y-2026.03-1.exe"}
         expected["silSetupVersionCounter"] = "0"
         expected["DriveSetupLocalPath"] = ""
         expected["silSetupPath"] = Config.STATE_DEFAULTS["silSetupPath"]

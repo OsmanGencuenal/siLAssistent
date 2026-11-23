@@ -58,7 +58,7 @@ class GitInstallationTests(unittest.TestCase):
                 installer.write_bytes(b"test placeholder, never executed")
                 stack.enter_context(patch.object(Config,"state",return_value={"GitInstallationPath":str(installer)}))
                 save=stack.enter_context(patch.object(Config,"set_state"))
-                stack.enter_context(patch("win32com.shell.shell.ShellExecuteEx",return_value={"hProcess":123}))
+                launch=stack.enter_context(patch("win32com.shell.shell.ShellExecuteEx",return_value={"hProcess":123}))
                 stack.enter_context(patch("win32event.WaitForSingleObject"))
                 stack.enter_context(patch("win32process.GetExitCodeProcess",return_value=0))
                 stack.enter_context(patch("win32api.CloseHandle"))
@@ -71,6 +71,9 @@ class GitInstallationTests(unittest.TestCase):
                 else:
                     GitInstallation.install()
                     save.assert_called_once_with("GitInstallationState",True)
+                    assert "/VERYSILENT" in launch.call_args.kwargs["lpParameters"]
+                    assert launch.call_args.kwargs["nShow"]==0
+                    assert launch.call_args.kwargs["lpFile"]!=str(installer)
 
     @classmethod
     def test_recorded_installation_skips_detection_on_every_action(cls):
@@ -124,5 +127,5 @@ class GitInstallationTests(unittest.TestCase):
         with patch.object(Config,"set_state") as save,patch.object(GitInstallation,"missing_prompt") as prompt:
             GitInstallation.poll_probe(window)
             save.assert_called_once_with("GitInstallationState",False)
-            prompt.assert_called_once_with(window)
+            prompt.assert_called_once_with(window,retry=None)
         window.close()

@@ -358,6 +358,48 @@ class SetupControlTests(unittest.TestCase):
             window.close()
 
     @classmethod
+    def test_live_input_selection_can_be_replaced_by_typing(cls):
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtTest import QTest
+        app=QApplication.instance() or QApplication([])
+        with patch("source.setup_operation.setup_control_window.threading.Thread"):
+            window=SetupControlWindow.open();state=window._setup_control
+            try:
+                state["selected"]="one.sil";state["connected_path"]="one.sil"
+                for key in ("rpm","accelerator","brake"):
+                    state["mode"].setCurrentText("Test-Bench" if key=="rpm" else "IMO")
+                    edit=state["inputs"][key]
+                    assert edit.isEnabled()
+                    edit.setText("50");edit.selectAll()
+                    for value in (50,60,50):
+                        state["responses"].put(("inputs","one.sil",{key:value}))
+                        SetupControlWindow.poll(window)
+                        assert edit.selectedText()=="50"
+                    QTest.keyClicks(edit,"25")
+                    assert edit.text()=="25" and edit.isModified()
+                    state["responses"].put(("inputs","one.sil",{key:100}))
+                    SetupControlWindow.poll(window)
+                    assert edit.text()=="25"
+            finally:window.close()
+
+    @classmethod
+    def test_live_updates_preserve_cursor_inside_focused_input(cls):
+        from PySide6.QtWidgets import QApplication
+        app=QApplication.instance() or QApplication([])
+        with patch("source.setup_operation.setup_control_window.threading.Thread"):
+            window=SetupControlWindow.open();state=window._setup_control
+            try:
+                state["selected"]="one.sil";state["connected_path"]="one.sil"
+                for key in ("rpm","accelerator","brake"):
+                    edit=state["inputs"][key];edit.setText("50");edit.setCursorPosition(1)
+                    with patch.object(type(edit),"hasFocus",return_value=True):
+                        for value in (50,60):
+                            state["responses"].put(("inputs","one.sil",{key:value}))
+                            SetupControlWindow.poll(window)
+                            assert edit.text()=="50" and edit.cursorPosition()==1
+            finally:window.close()
+
+    @classmethod
     def test_operation_scrollbars_on_small_viewport(cls):
         from PySide6.QtWidgets import QApplication
         app=QApplication.instance() or QApplication([])
@@ -456,6 +498,24 @@ class SetupControlTests(unittest.TestCase):
             cls.saved_settings.assert_any_call("SetupHeadless",True)
             cls.saved_settings.assert_any_call("SetupAutoConnect",True)
             cls.saved_settings.assert_any_call("FlashFilesGrouped",True)
+
+    @classmethod
+    def test_grouping_starts_enabled_even_when_previous_preference_was_false(cls):
+        from source.setup_operation.parameter_files_panel import ParameterFilesPanel
+        from source.silver.parameter_files import SilverParameterFiles
+        from unittest.mock import Mock
+        with patch("source.setup_operation.setup_control_window.threading.Thread"),patch.object(Config,"state",return_value={"SetupAutoConnect":False,"FlashFilesGrouped":False,"SetupHeadless":False,"SetupExitNow":False}):
+            window=SetupControlWindow.open();panel=window._setup_control["parameter_panel"]
+            try:
+                assert panel._grouped.isChecked()
+                panel._dispatch=Mock();slave,master=SilverParameterFiles.TARGETS
+                ParameterFilesPanel.populate(panel,{slave:{"files":["s.dcm"]},master:{"files":["m.dcm"]}})
+                ParameterFilesPanel.change(panel,master,0,"shared.dcm");panel._flash.click()
+                changes=panel._dispatch.call_args.args[1]
+                assert changes[slave]==changes[master]==["shared.dcm"]
+                panel._grouped.setChecked(False)
+                assert not panel._grouped.isChecked()
+            finally:window.close()
 
     @classmethod
     def test_hover_popup_uses_listview_and_green_selection(cls):

@@ -15,6 +15,7 @@ from ..core.runtime import Runtime
 
 class Launcher:
     _window = None
+    _update_started = False
     _messages = queue.Queue()
     BG = "#1e1e2e"
     PANEL = "#2a2a3e"
@@ -299,6 +300,8 @@ class Launcher:
         if getattr(cls, "_checking", False):
             return
         config = Config.load()
+        cls._share_notice_shown=False
+        cls._update_check_notice_shown=False
         cls.start_silver_check(config["update_ini_path"])
         if not config["update_ini_path"]:
             cls.update_status("Noch kein Laufwerk-Updatepfad konfiguriert (siLAssistent.ini).")
@@ -333,11 +336,11 @@ class Launcher:
             cls._silver_checking = False
 
     @classmethod
-    def stage_worker(cls, release):
+    def stage_worker(cls, release, cancelled=None):
         try:
-            cls._messages.put(("installer", str(UpdateManager.stage(release,progress=lambda text,value:cls._messages.put(("update_progress",(text,value)))))))
+            cls._messages.put(("installer", str(UpdateManager.stage(release,progress=lambda text,value:cls._messages.put(("update_progress",(text,value))),cancelled=cancelled))))
         except Exception as error:
-            cls._messages.put(("install_error", str(error)))
+            cls._messages.put(("update_cancelled",None) if cancelled is not None and cancelled.is_set() else ("install_error",str(error)))
 
     @classmethod
     def poll(cls):
@@ -349,14 +352,23 @@ class Launcher:
         except queue.Empty:
             return
         cls._checking = False
+        if kind == "update_cancelled":return
         if kind == "check_error":
             # An unavailable share must not insert technical errors into the launcher.
             cls.update_status(f"Updateprüfung nicht möglich: {data}")
             logging.getLogger("siLAssistent").info("Background update check unavailable: %s", data)
+            from ..core.network_share import NetworkShare
+            if NetworkShare.is_error(data) and not getattr(cls,"_share_notice_shown",False):
+                cls._share_notice_shown=True
+                from .dialogs import Dialogs
+                Dialogs.message("M286-Laufwerk nicht erreichbar",str(data),cls._window)
         elif kind == "install_error":
             cls.finish_update_progress()
             cls.update_status(f"Updateinstallation nicht möglich: {data}")
-            QMessageBox.warning(cls._window, "Update nicht möglich", str(data))
+            if cls._update_started:
+                cls._update_started=False
+                from .update_recovery import UpdateRecovery
+                UpdateRecovery.notice(cls._window,error=data,release=getattr(cls,"_update_release",None))
         elif kind == "silver_local":
             cls._detected_silver_version = data["version"]
         elif kind == "silver_release":
@@ -370,21 +382,30 @@ class Launcher:
                 UpdateManager.launch_after_exit(data)
                 cls._timer.stop()
                 cls.finish_update_progress()
+                cls._window._update_exit=True
                 QApplication.instance().quit()
             except Exception as error:
                 cls.finish_update_progress()
                 cls.update_status(str(error))
-                QMessageBox.warning(cls._window, "Update nicht möglich", str(error))
+                if cls._update_started:
+                    cls._update_started=False
+                    from .update_recovery import UpdateRecovery
+                    UpdateRecovery.notice(cls._window,error=error,release=getattr(cls,"_update_release",None))
         elif data["available"]:
-            answer = QMessageBox.question(cls._window, "Update verfügbar", data["message"] +
-                      f"\nInstalliert: {Config.version()}\nVerfügbar: {data['latest_version']}")
+            from .update_recovery import UpdateRecovery
+            cls._update_release=data
+            cls._update_started=False
+            answer=UpdateRecovery.offer(cls._window,data)
             if answer == QMessageBox.StandardButton.Yes:
+                cls._update_started=True
+                cls._update_cancel=threading.Event()
                 cls.update_status("Update wird lokal vorbereitet und geprüft …")
-                cls.update_progress("Update wird lokal vorbereitet …",0)
+                cls.update_progress("Update ... Verbindung zum Laufwerk wird hergestellt …",None)
                 cls._checking = True
-                threading.Thread(target=cls.stage_worker, args=(data,), daemon=True).start()
-            elif data.get("force_update"):
-                QApplication.instance().quit()
+                try:threading.Thread(target=cls.stage_worker, args=(data,cls._update_cancel), daemon=True).start()
+                except Exception as error:cls._messages.put(("install_error",str(error)))
+            else:
+                cls.update_status("Update wurde zurückgestellt.")
         else:
             cls.update_status("siLAssistent ist aktuell.")
 
@@ -453,6 +474,9 @@ class Launcher:
 
     @classmethod
     def close_event(cls, window, event):
+        if getattr(window,"_update_exit",False) is True:
+            event.accept()
+            return
         if getattr(window, "_close_prompt", None) is not None:
             cls.foreground_close_prompt(window._close_prompt)
             event.ignore()
@@ -464,8 +488,11 @@ class Launcher:
         box.setWindowTitle("siLAssistent beenden")
         box.setText("Wollen Sie siLAssistent beenden?")
         box.setIcon(QMessageBox.Icon.Question)
-        yes = box.addButton("Ja", QMessageBox.ButtonRole.YesRole)
-        no = box.addButton("Nein", QMessageBox.ButtonRole.NoRole)
+        yes = box.addButton("Yes", QMessageBox.ButtonRole.YesRole)
+        no = box.addButton("No", QMessageBox.ButtonRole.NoRole)
+        no.setObjectName("exitNo")
+        no.setProperty("suiteButtonFrame",True)
+        box.setStyleSheet(box.styleSheet()+" QPushButton#exitNo {border:2px solid #40e0d0; border-radius:5px; padding:6px 24px;}")
         box.setDefaultButton(no)
         box.setEscapeButton(no)
         box.setWindowModality(Qt.WindowModality.ApplicationModal)
@@ -487,6 +514,8 @@ class Launcher:
 
     @classmethod
     def startup(cls):
+        from ..stand_management.git_incoming_updates import GitIncomingUpdates
+        GitIncomingUpdates.check(cls._window)
         if cls._startup_updates:
             cls.check_updates()
         else:

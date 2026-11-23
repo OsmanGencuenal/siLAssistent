@@ -14,7 +14,7 @@ class ParameterFilesPanel:
         content=QWidget();layout=QVBoxLayout(content)
         layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         header=QHBoxLayout();title=QLabel("Flashen ::");title.setStyleSheet("color:#facc15; font:700 16pt 'Segoe UI';")
-        grouped=QCheckBox("Gruppieren");grouped.setChecked(False);panel._grouped=grouped
+        grouped=QCheckBox("Gruppieren");grouped.setChecked(True);panel._grouped=grouped
         ButtonGradients.apply(grouped,"#fed7aa",padding="8px 12px",checked="#99f6e4")
         from ..ui.checkboxes import Checkboxes
         Checkboxes.full_click(grouped)

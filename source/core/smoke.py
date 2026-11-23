@@ -75,18 +75,50 @@ class SmokeTest:
             raise AssertionError("Setup dialog icon missing")
         dialog.close()
         window.close()
+        ui_lifetime=cls.ui_lifetime_check()
         from .process_runtime import ProcessRuntime
         multiprocessing_ok=ProcessRuntime.self_test()
         from ..silver.licences import SilverLicences
         portable=cls.portable_runtime_check()
         portable["silver_api_worker"]=cls.api_worker_self_test() if portable["packaged"] else False
+        portable["silver_ui_worker"]=cls.ui_worker_self_test() if portable["packaged"] else False
         portable["offline_drivers"]=cls.offline_driver_check() if portable["packaged"] else False
         report = {**portable,"release_paths":{key:Config.STATE_DEFAULTS[key] for key in ("silverInstallerPath","silSetupPath","GitInstallationPath","GitSetupRepo")},"silver_license_servers":list(SilverLicences.servers()),"multiprocessing":multiprocessing_ok,"ok": True, "version": Config.version(), "inca_methods": len(inca_names),
-                  "silver_methods": len(silver_names), "launcher_ui": True, "setup_ui": True, "state_ini": True, "git_jira": True,
+                  "silver_methods": len(silver_names), "launcher_ui": True, "setup_ui": True, "ui_lifetime": ui_lifetime, "state_ini": True, "git_jira": True,
                   "vendor_apps_started": False, "network_used": False, "catalog_hashes": {product: hashlib.sha256(json.dumps(Catalog.load(product), sort_keys=True).encode()).hexdigest() for product in ("inca", "silver")}}
         Path(destination).parent.mkdir(parents=True, exist_ok=True)
         Path(destination).write_text(json.dumps(report, indent=2), encoding="utf-8")
         return 0
+
+    @classmethod
+    def ui_lifetime_check(cls):
+        import sys
+        import shiboken6
+        from unittest.mock import patch
+        from PySide6.QtCore import QCoreApplication,QEvent,Qt
+        from PySide6.QtWidgets import QApplication,QPushButton
+        from ..setup_operation.setup_control_window import SetupControlWindow
+        from ..ui.button_frames import ButtonFrames
+        from ..ui.responsive_setup import ResponsiveSetup
+        app=QApplication.instance();errors=[]
+        ButtonFrames.install()
+        with patch.object(sys,'excepthook',side_effect=lambda *args:errors.append(str(args[1]))),patch.object(Config,'state',return_value={}),patch.object(Config,'set_state'),patch.object(SetupControlWindow,'connection_worker'),patch.object(SetupControlWindow,'worker'):
+            for _ in range(3):
+                window=SetupControlWindow.open();state=window._setup_control
+                window.showNormal();app.processEvents()
+                ResponsiveSetup.schedule(window)
+                window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose,True)
+                window.close()
+                QCoreApplication.sendPostedEvents(None,QEvent.Type.DeferredDelete)
+                app.processEvents()
+                if shiboken6.isValid(window) or not state.get('responsive_disposed'):
+                    raise AssertionError('Setup window/filter did not shut down cleanly')
+                ResponsiveSetup.event(window,QEvent(QEvent.Type.Resize))
+                button=QPushButton('Lifecycle probe');button.show();app.processEvents()
+                button.deleteLater();QCoreApplication.sendPostedEvents(None,QEvent.Type.DeferredDelete)
+                app.processEvents()
+        if errors:raise AssertionError('Qt lifecycle errors: '+str(errors))
+        return True
 
     @classmethod
     def portable_runtime_check(cls):
@@ -110,6 +142,10 @@ class SmokeTest:
         api_command=SilverConnection.worker_launch_command("C:/Silver")
         if Path(api_command[0]).resolve()!=executable or api_command[1]!="--silver-api-worker":
             raise AssertionError("Silver API worker depends on external Python")
+        from ..silver.ui_client import SilverUiClient
+        ui_command=SilverUiClient.command(1,0.0)
+        if Path(ui_command[0]).resolve()!=executable or ui_command[1]!="--silver-ui-worker":
+            raise AssertionError("Silver UI worker depends on external Python")
         import psutil
         dependencies={Path(entry.path).resolve() for entry in psutil.Process().memory_maps() if re.fullmatch(r"python[0-9_]*\.dll|qt6[^/\\]*\.dll",Path(entry.path).name,re.I)}
         root=executable.parent
@@ -132,6 +168,18 @@ class SmokeTest:
             if result["pid"]==os.getpid() or Path(result["executable"]).resolve()!=Path(sys.executable).resolve():
                 raise AssertionError("Silver API worker did not restart the packaged EXE")
             return True
+
+    @classmethod
+    def ui_worker_self_test(cls):
+        import os
+        from ..silver.ui_client import SilverUiClient
+        session=SilverUiClient.start(os.getpid())
+        try:
+            result=SilverUiClient.call(session,"probe")
+            if result["pid"]==os.getpid() or result.get("apartment")!="MTA":
+                raise AssertionError("UI Automation was not isolated in its own MTA worker")
+            return True
+        finally:SilverUiClient.close(session,grace=0)
 
     @classmethod
     def offline_driver_check(cls):

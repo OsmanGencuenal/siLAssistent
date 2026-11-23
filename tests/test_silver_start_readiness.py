@@ -40,7 +40,7 @@ def test_vendor_start_messages_are_retained(tmp_path):
     messages=queue.Queue()
     with patch.object(Runtime,"data_root",return_value=tmp_path):
         SilverConnection.read_output(io.StringIO('Timeout waiting for Silver\nSILASSISTENT_RPC {"id":"1","result":true}\n'),messages)
-    assert 'Timeout waiting for Silver' in (tmp_path/'silver_connection_worker.log').read_text()
+    assert 'Timeout waiting for Silver' in (tmp_path/'Logs'/'silver_connection_worker.log').read_text()
     assert messages.get()["result"] is True
 
 

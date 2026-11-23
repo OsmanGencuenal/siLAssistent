@@ -24,8 +24,10 @@ class GitWindow:
         if cls._window is not None and cls._window.isVisible():
             cls._window.raise_()
             cls._window.activateWindow()
-            cls.start(cls._window,"check")
+            cls.check_access_if_licensed(cls._window)
             GitCommitView.reload(cls._window)
+            from .git_incoming_updates import GitIncomingUpdates
+            GitIncomingUpdates.check(cls._window)
             return cls._window
         font = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/segoeui.ttf"
         if font.is_file():
@@ -110,7 +112,7 @@ class GitWindow:
         user = QLineEdit(GitTool.windows_user()["username"].upper())
         user.setObjectName("gitUserId")
         layout.addWidget(user)
-        clone = QPushButton("Setup Lokal Klonen")
+        clone = QPushButton("Setup Lokal Download (Clonen)")
         clone.setObjectName("gitClone")
         ButtonGradients.apply(clone,"#86efac")
         layout.addWidget(clone)
@@ -189,11 +191,13 @@ class GitWindow:
         timer.start(100)
         window.showMaximized()
         if Config.state().get("GitInstallationState",False):
-            cls.start(window,"check")
+            cls.check_access_if_licensed(window)
         else:
-            GitInstallation.start_probe(window,retry=lambda: cls.start(window,"check"))
+            GitInstallation.start_probe(window,retry=lambda: cls.check_access_if_licensed(window))
         cls.load_branches(window)
         GitCommitView.reload(window)
+        from .git_incoming_updates import GitIncomingUpdates
+        GitIncomingUpdates.check(window)
         return window
 
     @classmethod
@@ -213,16 +217,17 @@ class GitWindow:
         state["branch_worker"].start()
 
     @classmethod
-    def activate_branch(cls, window):
-        if not GitInstallation.require(window,retry=lambda: cls.activate_branch(window)):
+    def activate_branch(cls, window, approval=None):
+        if not GitInstallation.require(window,retry=lambda: cls.activate_branch(window,approval=approval)):
             return
         from ..ui.git_licence import GitLicenceFlow
         state=window._git
-        if state["busy"] or not state["branches"].currentText():
+        if state["busy"]:
             return
         if not GitLicenceFlow.allow_git_action(window):
             return
-        branch=state["branches"].currentText()
+        # Confirmation owns its target; background metadata must never choose it again.
+        branch=approval["target"] if approval is not None else state["branches"].currentText()
         if not branch:
             return
         state["busy"]=True
@@ -237,14 +242,16 @@ class GitWindow:
             listing.clear()
         cls.show_clone_progress(window,branch+" wird aktiviert", "branch_progress")
         path=Config.state()["GitLocalRepoPath"]
-        state["branch_worker"]=threading.Thread(target=cls.branch_worker,args=(state["branch_queue"],state["branch_request"],path,branch,state["user"].text()),daemon=True)
+        state["branch_worker"]=threading.Thread(target=cls.branch_worker,args=(state["branch_queue"],state["branch_request"],path,branch,state["user"].text(),approval),daemon=True)
         state["branch_worker"].start()
 
     @classmethod
-    def branch_worker(cls, messages, request, path, branch, user_id):
+    def branch_worker(cls, messages, request, path, branch, user_id, approval=None):
         from .git_branches import GitBranches
         try:
-            result=GitBranches.activate(path,branch,user_id) if branch else GitBranches.list(path)
+            if branch:
+                result=GitBranches.activate(path,branch,user_id,discard=approval) if approval is not None else GitBranches.activate(path,branch,user_id)
+            else:result=GitBranches.list(path,refresh=False)
             messages.put((request,path,branch,result,None))
         except Exception as error:
             messages.put((request,path,branch,None,str(error)))
@@ -260,6 +267,26 @@ class GitWindow:
             return
         if branch:
             cls.finish_clone_progress(window,"branch_progress")
+        if result and result.get("confirmation_required"):
+            # A modal dialog processes timers too. Keep the operation reserved until
+            # the decision returns, and do not launch a history reload in between.
+            try:
+                confirmed=Dialogs.confirm_branch_discard(result["active"],result["target"],result["approval"]["repositories"],window)
+            finally:
+                state["busy"]=False
+                for name in ("user","clone","path","branches","activate_branch"):
+                    state[name].setEnabled(True)
+            if request!=state["branch_request"] or path!=Config.state()["GitLocalRepoPath"]:
+                return
+            if confirmed:
+                cls.activate_branch(window,approval=result["approval"])
+            else:
+                GitCommitView.reload(window)
+                import html
+                state["branch_note"].setTextFormat(Qt.TextFormat.RichText)
+                state["branch_note"].setText('Branchwechsel abgebrochen. Aktiver Branch: <span style="color:#40e0d0; font-weight:700;">'+html.escape(result["active"])+'</span>. Lokale Änderungen bleiben erhalten.')
+            return
+        if branch:
             state["busy"]=False
             GitCommitView.reload(window)
             for name in ("user","clone","path","branches"):
@@ -284,6 +311,8 @@ class GitWindow:
         state["branch_note"].setTextFormat(Qt.TextFormat.RichText)
         state["branch_note"].setText(note)
         if branch:
+            from .git_incoming_updates import GitIncomingUpdates
+            GitIncomingUpdates.check(window,restart=True)
             description="Aktuelle Branches der Submodule:"
             Dialogs.message(result["active"]+" Branch ist aktiviert.",description,window,
                             branch_status=result.get("submodule_branches",[]),target_branch=result["active"])
@@ -325,7 +354,7 @@ class GitWindow:
         return QIcon(pixmap)
 
     @classmethod
-    def save_repository_path(cls, window):
+    def save_repository_path(cls, window, force_reload=False):
         value = window._git["path"].text().strip()
         previous=Config.state()["GitLocalRepoPath"]
         try:
@@ -333,7 +362,7 @@ class GitWindow:
         except (OSError, ValueError) as error:
             QMessageBox.warning(window,"Pfad konnte nicht gespeichert werden",str(error))
             return False
-        if value!=previous:
+        if force_reload or value!=previous:
             cls.load_branches(window)
             GitCommitView.reload(window)
         return True
@@ -381,6 +410,7 @@ class GitWindow:
             return
         state["request"]+=1
         request=state["request"]
+        state["destination"]=destination
         user_id=state["user"].text()
         state["busy"]=operation in ("clone","license_login","license_order")
         if state["busy"]:
@@ -425,7 +455,8 @@ class GitWindow:
             if operation in ("license_login","license_order"):
                 from .git_license import GitLicense
                 from ..ui.git_licence import GitLicenceFlow
-                license_result=GitLicenceFlow.request_license() if operation=="license_order" else GitLicense.check(visible=True)
+                notify=lambda notice:messages.put((request,user_id,"license_profile" if notice.get("license")=="profile_verification_required" else "license_checkout",notice,None))
+                license_result=GitLicenceFlow.request_license(notify=notify) if operation=="license_order" else GitLicense.check(visible=True,notify=notify)
                 result={"allowed":False,"status":"license_result",**license_result}
             else:
                 result=GitTool.clone_repository(user_id,destination) if operation=="clone" else GitTool.repository_check(user_id,persist=False)
@@ -435,6 +466,7 @@ class GitWindow:
 
     @classmethod
     def poll(cls, window):
+        if getattr(window,"_git_profile_notice_open",False) is True:return
         state=window._git
         cls.poll_branches(window)
         try:
@@ -442,6 +474,14 @@ class GitWindow:
         except queue.Empty:
             return
         if request != state["request"] or user_id != state["user"].text():
+            return
+        if operation=="license_profile":
+            from ..ui.git_licence import GitLicenceFlow
+            GitLicenceFlow.profile_notice(window,result)
+            return
+        if operation=="license_checkout":
+            from ..ui.git_licence import GitLicenceFlow
+            GitLicenceFlow.checkout_notice(window)
             return
         state["busy"]=False
         if operation=="clone":
@@ -458,7 +498,11 @@ class GitWindow:
                 finally:
                     GitLicense.close_confirmation_browser(result)
             else:
-                window.statusBar().showMessage(result.get("reason","Lizenz noch nicht bestätigt.") if result else error)
+                detail=result.get("reason","Lizenz noch nicht bestätigt.") if result else error
+                window.statusBar().showMessage(detail)
+                from ..ui.dialogs import Dialogs
+                window.showNormal();window.raise_();window.activateWindow()
+                Dialogs.message("Git User Lizenz – Bestellung prüfen" if result and result.get("license")=="review" else "Git User Lizenz",detail,window)
             state["clone"].setEnabled(True)
             return
         state["allowed"]=bool(result and result["allowed"])
@@ -480,24 +524,23 @@ class GitWindow:
         elif result["status"] in ("git_error","unavailable") and operation!="check":
             from ..ui.dialogs import Dialogs
             Dialogs.message("Git-Vorgang nicht abgeschlossen",result.get("reason","Git erreicht den Server momentan nicht. Bitte Netzwerk, VPN und Git-Anmeldung prüfen."),window)
-        elif result["status"]=="authentication_required" and operation!="check":
-            from ..ui.dialogs import Dialogs
-            Dialogs.message("Git-Anmeldung erforderlich",result["reason"],window)
+        elif result["status"] in ("authentication_required","authentication_or_access_required","unverified") and operation!="check":
+            from .git_authentication import GitAuthentication
+            destination=state.get("destination")
+            incomplete=result.get("incomplete_path")
+            GitAuthentication.offer(window,retry=lambda:cls.resume_after_authentication(window,operation,destination,incomplete))
         elif result["status"]=="git_missing":
             GitInstallation._resolved_executable=None
             GitInstallation.require(window)
         elif result["status"]=="cloned":
             state["path"].setText(result["path"])
-            cls.save_repository_path(window)
+            cls.save_repository_path(window,force_reload=True)
             window.statusBar().showMessage("Setup erfolgreich lokal geklont.")
             from ..ui.dialogs import Dialogs
             Dialogs.message("M286-Setup erfolgreich geklont","Repo wurde unter ::\n"+result["path"]+"\n\nerfolgreich geklont.",window)
         elif result["allowed"]:
             window.statusBar().showMessage("Zugriff bestätigt.")
             if operation=="preclone":
-                from ..ui.git_licence import GitLicenceFlow
-                if not GitLicenceFlow.allow_git_action(window):
-                    return
                 folder=QFileDialog.getExistingDirectory(window,"Übergeordneten Ordner für SimFiles wählen",Config.state()["GitLocalRepoPath"])
                 if folder:
                     cls.start(window,"clone",str(GitTool.clone_target(folder)))
@@ -515,7 +558,17 @@ class GitWindow:
             state["status"].setToolTip(detail)
             window.statusBar().showMessage(detail)
             if operation != "check" and result.get("license")!="review":
-                cls.access_notice(window,detail)
+                if result["status"] in ("access_denied","identity_mismatch"):
+                    cls.access_notice(window,detail)
+                else:
+                    from ..ui.dialogs import Dialogs
+                    Dialogs.message("Git-Zugriff noch nicht bestätigt",detail,window)
+
+    @classmethod
+    def resume_after_authentication(cls,window,operation,destination,incomplete=None):
+        if incomplete:
+            Dialogs.message("GitHub-Anmeldung bestätigt","Das zuvor begonnene Klonen hat einen unvollständigen Ordner hinterlassen:\n"+incomplete+"\n\nDer Ordner bleibt erhalten. Bitte starten Sie den Download (Clonen) erneut mit einem neuen Zielordner.",window)
+        else:cls.start(window,"clone" if operation=="clone" else "preclone",destination if operation=="clone" else None)
 
     @classmethod
     def access_notice(cls, window, detail, force_request=False):
@@ -547,7 +600,15 @@ class GitWindow:
         state=window._git
         if state["busy"]:
             return
+        from ..ui.git_licence import GitLicenceFlow
+        if not GitLicenceFlow.allow_git_action(window):return
         cls.start(window,"preclone")
+
+    @classmethod
+    def check_access_if_licensed(cls,window):
+        # Startup must not check repository access before a license is confirmed.
+        if Config.state().get("GitUserLicenceState",False):cls.start(window,"check")
+        else:window._git["status"].setText("Git User Lizenz vor dem Klonen bestätigen.")
 
     @classmethod
     def close_event(cls, window, event):

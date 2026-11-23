@@ -8,6 +8,8 @@ class ReleasePaths:
 
     @classmethod
     def read(cls,ini):
+        from .network_share import NetworkShare
+        NetworkShare.require_file(ini)
         parser=Config.parser(Path(ini))
         values={key:parser.get("PATH",key,fallback="").strip() for key in cls.KEYS}
         for key in ("silverInstallerPath","silSetupPath","GitInstallationPath"):
@@ -24,6 +26,7 @@ class ReleasePaths:
 
     @classmethod
     def normalize_path(cls,value):
+        value=Config.network_path(value)
         # INI paths are literal: tolerate mistakenly doubled JSON-style backslashes.
         if value.startswith("\\\\"):
             return "\\\\"+"\\".join(part for part in value.split("\\") if part)

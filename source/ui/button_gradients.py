@@ -3,6 +3,7 @@ from PySide6.QtGui import QColor,QIcon,QPainter
 
 class ButtonGradients:
     COLORS={
+        "jira_request":("#169c50","#086637","#74e8a0"),
         "support":("#743b4d","#382431","#ecc1cd"),
         "#86efac":("#347a5c","#194936","#86efac"),
         "#172554":("#234579","#101f42","#7096cb"),

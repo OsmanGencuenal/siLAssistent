@@ -114,7 +114,7 @@ class LauncherTests(unittest.TestCase):
         cls.app.processEvents()
         footer = window.findChild(QFrame, "bottomBar")
         initial = footer.geometry()
-        with patch.object(Launcher, "_messages", queue.Queue()), patch("source.ui.launcher.QMessageBox.warning") as warning:
+        with patch.object(Launcher, "_messages", queue.Queue()), patch("source.ui.update_recovery.UpdateRecovery.notice"), patch("source.ui.launcher.QMessageBox.warning") as warning:
             Launcher._messages.put(("check_error", "Missing update share: " + "very long path/" * 100))
             Launcher.poll()
             cls.app.processEvents()
@@ -146,7 +146,7 @@ class LauncherTests(unittest.TestCase):
     def test_close_confirmation_accepts_only_yes(cls):
         from PySide6.QtCore import QTimer, Qt
         from PySide6.QtWidgets import QMessageBox
-        for answer, remains_visible in (("Nein", True), ("Ja", False)):
+        for answer, remains_visible in (("No", True), ("Yes", False)):
             window = Launcher.create()
             window.closeEvent = lambda event: Launcher.close_event(window, event)
             window.show()
@@ -154,7 +154,7 @@ class LauncherTests(unittest.TestCase):
                 box = window._close_prompt
                 assert box.windowModality() == Qt.WindowModality.ApplicationModal
                 assert box.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
-                assert box.defaultButton().text() == "Nein"
+                assert box.defaultButton().text() == "No"
                 next(button for button in box.buttons() if button.text() == answer).click()
             with patch.object(Launcher, "foreground_close_prompt"):
                 QTimer.singleShot(20, choose)

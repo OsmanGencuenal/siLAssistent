@@ -190,7 +190,8 @@ class GitWindowTests(unittest.TestCase):
     def test_branch_activation_progress_ends_after_result(cls):
         from source.ui.git_licence import GitLicenceFlow
         from PySide6.QtWidgets import QLabel
-        with patch.object(GitWindow,"start"), patch.object(Config,"state",return_value={"GitLocalRepoPath":"D:/SimFiles"}), patch.object(GitLicenceFlow,"allow_git_action",return_value=True), patch("source.stand_management.git_window.threading.Thread"), patch("source.silEinrichten.SilEinrichten.foreground_dialog"), patch("source.ui.dialogs.Dialogs.message"):
+        from source.stand_management.git_incoming_updates import GitIncomingUpdates
+        with patch.object(GitIncomingUpdates,"check") as remote_check,patch.object(GitWindow,"start"), patch.object(Config,"state",return_value={"GitLocalRepoPath":"D:/SimFiles"}), patch.object(GitLicenceFlow,"allow_git_action",return_value=True), patch("source.stand_management.git_window.threading.Thread"), patch("source.silEinrichten.SilEinrichten.foreground_dialog"), patch("source.ui.dialogs.Dialogs.message"):
             window=GitWindow.open()
             window._git["branches"].addItems(["main","develop"])
             window._git["branches"].setCurrentIndex(1)
@@ -199,11 +200,13 @@ class GitWindowTests(unittest.TestCase):
             assert dialog.findChild(QLabel,"heading").text()=="develop wird aktiviert"
             assert any(label.text()=="Bitte warten ..." for label in dialog.findChildren(QLabel))
             result={"branches":["main","develop"],"active":"develop","warning":""}
+            remote_check.reset_mock()
             window._git["branch_queue"].put((window._git["branch_request"],"D:/SimFiles","develop",result,None))
             GitWindow.poll_branches(window)
             assert "branch_progress" not in window._git
             assert not window._git["busy"]
             assert window._git["branches"].currentText()=="develop"
+            remote_check.assert_called_once_with(window,restart=True)
             window.close()
 
     @classmethod
@@ -213,7 +216,7 @@ class GitWindowTests(unittest.TestCase):
         messages=queue.Queue()
         with patch.object(GitBranches,"list",return_value={"branches":["main","devAGK"]}) as listing, patch.object(GitBranches,"activate") as activate:
             GitWindow.branch_worker(messages,1,"repo",None,None)
-            listing.assert_called_once_with("repo")
+            listing.assert_called_once_with("repo",refresh=False)
             activate.assert_not_called()
 
     @classmethod
@@ -257,7 +260,7 @@ class GitWindowTests(unittest.TestCase):
     @classmethod
     def test_open_unknown_git_starts_probe_before_repo_check(cls):
         from source.stand_management.git_installation import GitInstallation
-        with patch.object(Config,"state",return_value={"GitLocalRepoPath":"","GitInstallationState":False}), patch.object(GitWindow,"start") as repo, patch.object(GitInstallation,"start_probe") as probe:
+        with patch.object(Config,"state",return_value={"GitLocalRepoPath":"","GitInstallationState":False,"GitUserLicenceState":True}), patch.object(GitWindow,"start") as repo, patch.object(GitInstallation,"start_probe") as probe:
             window=GitWindow.open()
             probe.assert_called_once()
             repo.assert_not_called()

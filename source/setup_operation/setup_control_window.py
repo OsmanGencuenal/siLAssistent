@@ -47,7 +47,7 @@ class SetupControlWindow:
         central=QSplitter(Qt.Orientation.Horizontal)
         central.setChildrenCollapsible(False)
         sidebar=QWidget();sidebar.setObjectName("setupSidebar")
-        sidebar.setMinimumWidth(260);sidebar.setMaximumWidth(520)
+        sidebar.setMinimumWidth(260)
         layout=QVBoxLayout(sidebar);layout.setContentsMargins(14,18,14,14);layout.setSpacing(12)
         heading=QLabel("Setup-Auswahl ::");heading.setStyleSheet("color:#facc15; font:700 14pt 'Segoe UI';");layout.addWidget(heading)
         sources=QComboBox();sources.setObjectName("setupSource");sources.addItems(list(SetupControl.SOURCES))
@@ -123,7 +123,7 @@ class SetupControlWindow:
             label.setAlignment(Qt.AlignmentFlag.AlignCenter);label.setWordWrap(True)
             label.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Fixed)
             row_height=max(36,button.sizeHint().height())
-            button.setFixedHeight(row_height);label.setFixedHeight(row_height)
+            button.setMinimumHeight(row_height);label.setMinimumHeight(row_height)
             controls_layout.addLayout(row)
         clear_errors=QPushButton("Fehler Löschen");clear_errors.setObjectName("clearErrors")
         ButtonGradients.apply(clear_errors,"#fecaca")
@@ -207,8 +207,10 @@ class SetupControlWindow:
         state.update(controls_bottom=controls_bottom,log_heading=log_heading,manual_area=manual_area,sweep_panel=sweep_panel,sweep_cancel=threading.Event(),sweep_commands=queue.Queue(),log_view=log_view,mode=mode,operation_buttons=(mode_start,ignition,engine,start_stop,clear_errors,simulation,pause,init_values,close_setup),operation_status=operation_status,operating=False)
         state.update(simulation=simulation,parameter_panel=parameter_panel,pause=pause,paused=False,pending_action=None,last_inputs={},pending_input=None,pending_inputs=None,inputs=inputs,input_cards=input_cards,input_labels=input_labels,gear_label=gear_label,gear=gear,cycle=cycle,controls_scroll=controls_scroll)
         state.update(instances={},shutdown_pending=False,shutdown_ok=False,shutdown_loop=None,close_setup=close_setup,exit_now=exit_now,deferred_controls=set(),headless=headless,clear_errors=clear_errors,reload_setup=reload_setup,detach=detach,detaching=False,auto=auto,start_stop_state=start_stop_state,ignition_state=ignition_state,engine_state=engine_state)
-        state.update(sidebar_scroll=sidebar_scroll,flash_container=neighbor,empty_sections=empty_sections,section_toggles={})
+        state.update(sidebar_scroll=sidebar_scroll,flash_container=neighbor,empty_sections=empty_sections,section_toggles={},connection_row=connection_row,close_row=close_row)
         window._setup_control=state
+        from ..ui.responsive_setup import ResponsiveSetup
+        ResponsiveSetup.install(window)
         window.addToolBarBreak()
         sections_bar=QToolBar("Bereiche",window);sections_bar.setObjectName("setupSectionsToolbar")
         sections_bar.setMovable(False)
@@ -265,7 +267,8 @@ class SetupControlWindow:
         exit_now.setChecked(preferences.get("SetupExitNow",False))
         headless.setChecked(preferences.get("SetupHeadless",False))
         auto.setChecked(preferences.get("SetupAutoConnect",False))
-        parameter_panel._grouped.setChecked(preferences.get("FlashFilesGrouped",False))
+        # Start grouped every time; users can disable grouping for this session.
+        parameter_panel._grouped.setChecked(True)
         return window
 
     @classmethod
@@ -280,12 +283,35 @@ class SetupControlWindow:
         threading.Thread(target=cls.worker,args=(state["queue"],state["request"],source),daemon=True).start()
 
     @classmethod
+    def manual_path_changed(cls,path):
+        window=cls._window
+        if window is None:return
+        from shiboken6 import isValid
+        if not isValid(window):return
+        state=window._setup_control
+        if state["sources"].currentText()!="Lokale manuelle Kopie":return
+        if state["path"].text()==path:return
+        state["pending_manual_path"]=path
+        cls.refresh_manual_path(window)
+
+    @classmethod
+    def refresh_manual_path(cls,window):
+        state=window._setup_control
+        if not state.get("pending_manual_path"):return
+        if state["sources"].currentText()!="Lokale manuelle Kopie":
+            state.pop("pending_manual_path",None);return
+        if any(state.get(key,False) for key in ("connecting","operating","detaching","shutdown_pending")):return
+        state.pop("pending_manual_path",None)
+        cls.reload(window)
+
+    @classmethod
     def worker(cls,messages,request,source):
         try:messages.put((request,SetupControl.list_setups(source),None))
         except Exception as error:messages.put((request,None,str(error)))
 
     @classmethod
     def poll(cls,window):
+        cls.refresh_manual_path(window)
         state=window._setup_control
         try:
             while True:
@@ -368,7 +394,10 @@ class SetupControlWindow:
                                 continue
                             state["last_inputs"][key]=format(value,"g")
                             edit=state["inputs"][key]
-                            if not edit.isModified():edit.setText(format(value,"g"))
+                            text=format(value,"g")
+                            editing=edit.hasSelectedText() or (edit.hasFocus() and edit.cursorPosition()<len(edit.text()))
+                            # Reassigning even identical text destroys the selection/cursor.
+                            if edit.text()!=text and not edit.isModified() and not editing:edit.setText(text)
                 elif kind=="signals":
                     if state["selected"]==path and state["connected_path"]==path:
                         cls.display_states(window,error)
@@ -894,7 +923,6 @@ class SetupControlWindow:
         all_closed=not any(shown.values())
         state["empty_sections"].setVisible(all_closed)
         state["workspace"].setVisible(shown["controls"] or shown["flash"] or all_closed)
-        state["sidebar"].setMaximumWidth(520 if shown["controls"] or shown["flash"] else 16777215)
         cls.size_panels(window)
 
     @classmethod

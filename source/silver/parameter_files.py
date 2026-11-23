@@ -81,6 +81,11 @@ class SilverParameterFiles:
 
     @classmethod
     def apply_and_reload(cls,changes,setup_path,progress=None):
+        from ..core.network_share import NetworkShare
+        for payload in changes.values():
+            files=payload.get("files",[]) if isinstance(payload,dict) else payload
+            for value in [*files,*([payload.get("variant")] if isinstance(payload,dict) and payload.get("variant") else [])]:
+                NetworkShare.require_file(value)
         if cls.XML_FLASH_TRIAL:return cls.apply_xml_and_reload(changes,setup_path,progress)
         return cls.apply_via_api(changes,setup_path,progress)
 

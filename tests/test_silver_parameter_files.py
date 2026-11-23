@@ -42,7 +42,8 @@ class ParameterFileTests(unittest.TestCase):
         panel=Panel.create(owner,lambda action,data:sent.append((action,data)))
         slave,master=Files.TARGETS
         Panel.populate(panel,{slave:{"files":["slave.dcm"]},master:{"files":["master.dcm"]}})
-        assert not panel._grouped.isChecked()
+        assert panel._grouped.isChecked()
+        panel._grouped.setChecked(False)
         Panel.change(panel,slave,1,"extra.dcm")
         assert not sent
         assert len(panel._sections[slave]["edits"])==3

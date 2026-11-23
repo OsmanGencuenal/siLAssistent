@@ -26,3 +26,32 @@ def test_launcher_has_only_turquoise_setup_frame_and_setup_tools_navy():
     apply=QPushButton("Übernehmen",tool);ButtonFrames.decorate(apply)
     assert "border:2px solid #172554" in apply.styleSheet()
     launcher.close();tool.close()
+
+
+def test_message_boxes_outline_yes_without_changing_default_no():
+    from PySide6.QtWidgets import QMessageBox
+    app=QApplication.instance() or QApplication([]);ButtonFrames.install()
+    box=QMessageBox();box.setStandardButtons(QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)
+    box.setDefaultButton(QMessageBox.StandardButton.No)
+    yes=box.button(QMessageBox.StandardButton.Yes);no=box.button(QMessageBox.StandardButton.No)
+    box.show();app.processEvents()
+    assert yes.property("dialogAccent") and "#40e0d0" in yes.styleSheet()
+    assert not no.property("dialogAccent")
+    from PySide6.QtTest import QTest
+    QTest.qWait(50)
+    image=yes.grab().toImage()
+    assert any(image.pixelColor(x,y).name()=="#40e0d0" for x in range(image.width()) for y in range(min(3,image.height())))
+    assert box.defaultButton() is no
+    yes.click();assert box.clickedButton() is yes
+    box.deleteLater();app.processEvents()
+
+
+def test_exit_confirmation_retains_explicit_no_outline():
+    from PySide6.QtWidgets import QMessageBox
+    app=QApplication.instance() or QApplication([]);ButtonFrames.install()
+    box=QMessageBox();yes=box.addButton("Yes",QMessageBox.ButtonRole.YesRole)
+    no=box.addButton("No",QMessageBox.ButtonRole.NoRole);no.setObjectName("exitNo");box.setDefaultButton(no)
+    box.show();app.processEvents()
+    assert no.property("dialogAccent") and not yes.property("dialogAccent")
+    no.click();assert box.clickedButton() is no
+    box.deleteLater();app.processEvents()

@@ -118,7 +118,7 @@ class SilverInstallation:
         messages = queue.Queue()
         cancelled = threading.Event()
         state = {"exit_code": 1, "error": None, "finished": False,
-                 "wizard_visible": False, "wait_loop": QEventLoop()}
+                 "wizard_visible": False, "completed":False, "wait_loop": QEventLoop()}
         progress, body, animation = ui.create_progress_card(
             "Silver installieren", "Netzwerk-Installer wird vorbereitet ...", "Abbrechen"
         )
@@ -150,7 +150,9 @@ class SilverInstallation:
             cancelled.set()
             worker.join(timeout=0.2)
         if state["error"]:
-            ui.show_message("Silver-Installation nicht gestartet", state["error"])
+            ui.show_message("Silver-Installation nicht abgeschlossen", state["error"])
+        elif state.get("completed"):
+            ui.show_message("Silver erfolgreich installiert", "Silver wurde vollständig installiert und die Benutzereinstellungen wurden geprüft.")
         return state["exit_code"]
 
     @classmethod
@@ -170,9 +172,10 @@ class SilverInstallation:
                 if kind == "wizard_ready":
                     state["wizard_visible"] = True
                     body.setText("Silver-Wizard geöffnet. Die Installation wird automatisch vorbereitet ...")
-                if kind in ("installation_started", "installation_complete", "cancelled", "error"):
+                if kind in ("installation_complete", "cancelled", "error"):
                     state["finished"] = True
-                    state["exit_code"] = 0 if kind in ("installation_started", "installation_complete", "cancelled") else 1
+                    state["completed"] = kind == "installation_complete"
+                    state["exit_code"] = 0 if kind in ("installation_complete", "cancelled") else 1
                     state["error"] = message if kind == "error" else None
                     timer.stop()
                     animation.stop()
@@ -185,6 +188,30 @@ class SilverInstallation:
 
     @classmethod
     def launch_worker(cls, installer, messages, cancelled):
+        from source.silver.install_lock import SilverInstallLock
+        try:
+            worker=getattr(cls,"IS_WORKER",False)
+            if not worker:cls.ensure_no_active_installer()
+            request=getattr(cls,"SILENT_REQUEST",None) if worker else None
+            sid=request["sid"] if request else SilverUpdates.user_sid()
+            with SilverInstallLock.hold(sid,"worker" if worker else "request"):
+                if not worker:
+                    with SilverInstallLock.hold(sid,"worker"):pass
+                cls.perform_launch_worker(installer,messages,cancelled)
+        except Exception as error:
+            diagnostic=cls.save_launch_diagnostic([{"stage":"worker_error","message":str(error)}])
+            messages.put(("error",f"{error}\nDiagnose: {diagnostic}"))
+
+    @classmethod
+    def ensure_no_active_installer(cls):
+        import psutil
+        for process in psutil.process_iter(['name']):
+            name=(process.info.get('name') or '').casefold()
+            if name.startswith('silversetup') and name.endswith(('.exe','.tmp')):
+                raise RuntimeError(f'Eine Silver-Installation läuft bereits (PID {process.pid}). Bitte deren Abschluss abwarten; es wird keine zweite Installation gestartet.')
+
+    @classmethod
+    def perform_launch_worker(cls, installer, messages, cancelled):
         events = []
         known_pids = set()
         local_copy = None
@@ -198,6 +225,8 @@ class SilverInstallation:
                 SilverUpdates.sync_path(release)
                 cls.TARGET_VERSION = release["version"]
                 installer = release["installer_path"]
+            if str(installer).startswith("\\\\"):
+                local_copy=Path(tempfile.gettempdir())/"silassistent_installers"/Path(installer).name
             installer = cls.prepare_local_installer(installer, messages, cancelled)
             local_copy = cls.cached_installer(installer)
             if not getattr(cls, "IS_WORKER", False):
@@ -209,7 +238,7 @@ class SilverInstallation:
             request = getattr(cls, "SILENT_REQUEST", None) or SilverSilent.request()
             SilverSilent.validate_request(request)
             SilverSilent.environment()
-            SilverSilent.command(path, cls.TARGET_VERSION, request, Path(request["local_app_data"]) / "siLAssistent" / "preflight.log")
+            SilverSilent.command(path, cls.TARGET_VERSION, request, Runtime.log_root(request["local_app_data"]) / "preflight.log")
             if cls.UPDATE_REQUESTED:
                 SilverUpdates.validate_installer(path)
                 SilverUpdates.uninstall(cls.UNINSTALL_TARGET, cls.PREVIOUS_VERSION, messages,
@@ -229,6 +258,7 @@ class SilverInstallation:
                 try:
                     cls.stop_installation(known_pids)
                 except Exception as stop_error:
+                    cls.record_step(events,"cleanup_failed",message=str(error),stop_error=str(stop_error),cached_installer=str(local_copy))
                     messages.put(("error", f"{error}\nAbbruch nicht bestätigt: {stop_error}. Installer-Kopie bleibt erhalten."))
                     return
             try:
@@ -279,6 +309,7 @@ class SilverInstallation:
                     processes.append(process)
             except psutil.NoSuchProcess:
                 pass
+        if not processes:return
         # Prefer the installer's own cancellation and rollback before termination.
         from pywinauto import Desktop
         for process in processes:
@@ -334,25 +365,23 @@ class SilverInstallation:
         source = Path(installer).expanduser()
         if not str(source).startswith("\\\\"):
             return str(source)
-        info = source.stat()
+        from source.core.network_share import NetworkShare
+        with NetworkShare.access(source):info = source.stat()
         cache = Path(tempfile.gettempdir()) / "silassistent_installers"
         cache.mkdir(parents=True, exist_ok=True)
         target = cache / source.name
-        if target.exists() and target.stat().st_size == info.st_size and abs(target.stat().st_mtime - info.st_mtime) < 1:
-            messages.put(("status", "Lokaler Silver-Installer ist bereit."))
-            return str(target)
+        # Each new attempt gets a fresh copy. The installation lock prevents
+        # deleting a cached executable still used by an active worker.
+        cls.remove_local_installer(target)
         partial = cache / (source.name + f".{os.getpid()}.partial")
         copied = 0
         last_status = 0.0
         messages.put(("status", "Silver-Installer wird vom Netzwerk lokal vorbereitet ..."))
         try:
-            with source.open("rb") as incoming, partial.open("wb") as outgoing:
-                while True:
+            with partial.open("wb") as outgoing:
+                for block in NetworkShare.chunks(source,4*1024*1024):
                     if cancelled.is_set():
                         raise RuntimeError("Vorbereitung des Silver-Installers abgebrochen.")
-                    block = incoming.read(4 * 1024 * 1024)
-                    if not block:
-                        break
                     outgoing.write(block)
                     copied += len(block)
                     if time.monotonic() - last_status >= 1:
@@ -398,7 +427,9 @@ class SilverInstallation:
     @classmethod
     def relay_elevated_worker(cls, installer, messages, cancelled):
         # Nur der Assistent-Worker wird erhöht, nicht der IT-Shop-Browser.
-        directory = Path(tempfile.mkdtemp(prefix="silassistent_silver_"))
+        sessions=Runtime.log_root()/"SilverInstallation"
+        sessions.mkdir(parents=True,exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix="session_",dir=sessions))
         # Explizite Rechte für die normale GUI, auch wenn der erhöhte Worker
         # Dateien durch atomaren Austausch mit einem anderen Eigentümer erstellt.
         # Windows liefert die SID ohne zusätzliche Python-Pakete.
@@ -439,11 +470,13 @@ class SilverInstallation:
             messages.put(("status","Die Admin-Abfrage betrifft den bereits installierten Python-Interpreter für den Silver-Worker. Es wird kein Python installiert."))
         else:
             messages.put(("status","Die Admin-Abfrage betrifft den siLAssistent-Worker für die Silver-Installation."))
-        cls.shell_launch(interpreter, parameters=arguments, verb="open" if cls.is_administrator() else "runas", show=1)
+        worker_pid=cls.shell_launch(interpreter, parameters=arguments, verb="open" if cls.is_administrator() else "runas", show=0)
+        import psutil
+        worker_process=psutil.Process(worker_pid) if worker_pid and Runtime.is_compiled() else None
         messages.put(("status", "Admin-Freigabe erteilt. Assistent-Worker wird gestartet ..."))
         delivered = 0
         startup_deadline = time.monotonic() + 90
-        deadline = time.monotonic() + cls.WIZARD_TIMEOUT + 600
+        deadline = time.monotonic() + 7800
         cancel_requested = False
         while True:
             if cancelled.is_set() and not cancel_requested:
@@ -456,10 +489,19 @@ class SilverInstallation:
                 except (OSError, ValueError):
                     events = []
                 for kind, message in events[delivered:]:
+                    terminal=kind in ("installation_complete", "cancelled", "error")
+                    if terminal and kind in ("cancelled","error") and "Installer-Kopie bleibt" not in message:
+                        # Also clean failures before the elevated launch_worker
+                        # ran (invalid request/denied elevation). Finish cleanup
+                        # before the GUI receives its terminal event.
+                        try:cls.remove_local_installer(cls.cached_installer(installer))
+                        except Exception as cleanup_error:
+                            kind="error";message+=f"\nLokale Installer-Kopie konnte nicht entfernt werden: {cleanup_error}"
                     messages.put((kind, message))
                     delivered += 1
-                    if kind in ("installation_started", "installation_complete", "cancelled", "error"):
-                        return
+                    if terminal:return
+            if worker_process is not None and not worker_process.is_running():
+                raise RuntimeError(f"Der erhöhte Silver-Worker wurde ohne Abschlussmeldung beendet. Diagnose: {directory}")
             if delivered == 0 and time.monotonic() >= startup_deadline:
                 raise RuntimeError(f"Der Assistent-Worker hat keine Startrückmeldung geliefert. Startprotokoll: {result_path.with_suffix('.log')}")
             if time.monotonic() >= deadline:
@@ -469,6 +511,11 @@ class SilverInstallation:
     @classmethod
     def helper_main(cls, result_file, installer):
         cls.IS_WORKER = True
+        if sys.stdout is None or sys.stderr is None:
+            log=Path(result_file).with_suffix(".log")
+            stream=log.open("a",encoding="utf-8",buffering=1)
+            if sys.stdout is None:sys.stdout=stream
+            if sys.stderr is None:sys.stderr=stream
         if Path(installer).parent.name == "silassistent_installers":
             cls.CACHE_ROOT = Path(installer).parent.resolve()
         result_path = Path(result_file)
@@ -990,7 +1037,8 @@ class SilverInstallation:
 
     @classmethod
     def save_launch_diagnostic(cls, events):
-        path = Runtime.data_root() / "silver_installation_diagnose.json"
+        request=getattr(cls,"SILENT_REQUEST",None) if getattr(cls,"IS_WORKER",False) else None
+        path = Runtime.log_root(request["local_app_data"] if request else None) / "silver_installation_diagnose.json"
         try:
             path.write_text(json.dumps({"events": events}, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
             return str(path)
@@ -1291,7 +1339,7 @@ class SilEinrichten:
 
     @classmethod
     def save_button_diagnostic(cls, driver, stage="state"):
-        path = Runtime.data_root() / "itshop_button_diagnose.json"
+        path = Runtime.log_root() / "itshop_button_diagnose.json"
         try:
             data = driver.execute_script(r"""
                 return Array.from(document.querySelectorAll(
@@ -1447,6 +1495,8 @@ class SilEinrichten:
         # Enter darf keine ungewollte Installation auslösen.
         for button in (no_button, yes_button):
             button.setAutoDefault(False)
+        from .ui.dialog_button_accent import DialogButtonAccent
+        DialogButtonAccent.apply(dialog,yes_button)
         no_button.clicked.connect(lambda: dialog.done(2))
         yes_button.clicked.connect(dialog.accept)
         if title != "Silver-Update vorhanden":
@@ -1463,6 +1513,8 @@ class SilEinrichten:
 
     @classmethod
     def show_message(cls, title, description):
+        from source.core.network_share import NetworkShare
+        if NetworkShare.is_error(description):return Dialogs.message(title,description)
         dialog, layout, _ = cls.create_card(title, description)
         close_button = QPushButton("Schließen")
         close_button.setObjectName("primary")
@@ -1568,14 +1620,14 @@ class SilEinrichten:
     @classmethod
     def save_itshop_error(cls, message):
         report = {"process": "IT-Shop", "error": message}
-        diagnostic = Runtime.data_root() / "itshop_button_diagnose.json"
+        diagnostic = Runtime.log_root() / "itshop_button_diagnose.json"
         if "Button-Diagnose:" in message and diagnostic.is_file():
             try:
                 report["button_diagnostic"] = json.loads(diagnostic.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 pass
         text = json.dumps(report, ensure_ascii=False, indent=2)
-        path = Runtime.data_root() / "itshop_error.json"
+        path = Runtime.log_root() / "itshop_error.json"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
@@ -1744,7 +1796,7 @@ class SilEinrichten:
                 raise RuntimeError("SiL-Einrichten läuft bereits. Bitte zuerst den laufenden Vorgang beenden.")
             return cls._process
         command=cls.launch_command(silver_update,installer,previous_version,target_version,uninstall_target)
-        with (Runtime.data_root() / "silEinrichten.log").open("a", encoding="utf-8") as log:
+        with (Runtime.log_root() / "silEinrichten.log").open("a", encoding="utf-8") as log:
             cls._process = subprocess.Popen(command, cwd=str(Runtime.project_root()),
                                             stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)

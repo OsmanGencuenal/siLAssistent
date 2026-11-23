@@ -10,7 +10,9 @@ class RepoRequest:
     @classmethod
     def read_support_mail(cls, path):
         parser=configparser.ConfigParser(interpolation=None)
-        parser.read(Path(path),encoding="utf-8-sig")
+        from ..core.network_share import NetworkShare
+        if NetworkShare.matches(path):parser.read_string(NetworkShare.read_bytes(path).decode("utf-8-sig"))
+        else:parser.read(Path(path),encoding="utf-8-sig")
         values=[value.strip() for section in parser.sections() for key,value in parser.items(section) if key.lower()=="supportmail"]
         if len(values)!=1 or not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",values[0]):
             raise ValueError("Update-INI benötigt genau eine gültige supportMail-Adresse.")
@@ -26,7 +28,11 @@ class RepoRequest:
         try:
             recipient=cls.recipient()
         except (OSError,ValueError) as error:
-            QMessageBox.warning(parent,"Supportadresse fehlt",str(error))
+            from ..core.network_share import NetworkShare
+            if NetworkShare.is_error(error):
+                from ..ui.dialogs import Dialogs
+                Dialogs.message("M286-Laufwerk nicht erreichbar",str(error),parent)
+            else:QMessageBox.warning(parent,"Supportadresse fehlt",str(error))
             return
         dialog=QDialog(parent)
         dialog.setWindowTitle("Zugriff auf Setup-Repo beantragen")

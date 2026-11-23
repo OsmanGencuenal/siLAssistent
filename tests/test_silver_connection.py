@@ -73,7 +73,7 @@ class SilverConnectionTests(unittest.TestCase):
 
     @classmethod
     def test_disconnect_releases_all_owned_overrides(cls):
-        target=Mock()
+        target=Mock();target.get_variable_names.return_value=[];target.get_parameter_names.return_value=[]
         with patch.object(Worker,"target",target),patch.object(Worker,"overrides",set()):
             Worker.dispatch({"op":"call","method":"set_variable_value","args":["mapping.mdl.pos_AcceleratorPedal_const",0.2]})
             Worker.dispatch({"op":"call","method":"set_variable_value","args":["mapping.mdl.n_EngineSpeed_const",750]})
@@ -101,3 +101,40 @@ class SilverConnectionTests(unittest.TestCase):
             assert rpc.call_args.kwargs["timeout"]==300
             C.call("get_time")
             assert rpc.call_args.kwargs["timeout"]==10
+
+
+class ExistingApiRecoveryTests(unittest.TestCase):
+    @classmethod
+    def test_late_listener_is_refreshed_and_rpc_verified(cls):
+        api=Mock();grpc=Mock();library=Mock();library.SilverApi.return_value=api
+        candidate={'pid':123,'ports':[],'api_expected':True}
+        with patch.object(Worker,'grpc_api',library,create=True),patch.object(Worker,'grpc',grpc,create=True),patch.object(Worker,'existing_ports',side_effect=[[],[54321]]),patch('source.silver.connection_worker.time.sleep'),patch.object(Worker,'target',None),patch.object(Worker,'remote',Mock()) as remote:
+            result=Worker.connect({'path':'selected.sil','existing':[candidate]})
+            assert result['reused'] and result['pid']==123
+            api._simulation_control.StartedSuccessfully.assert_called_once_with(library.Empty.return_value,timeout=2)
+            remote.RemoteSilver.assert_not_called()
+
+    @classmethod
+    def test_http2_listener_is_not_enough_and_channel_is_closed(cls):
+        api=Mock();api._simulation_control.StartedSuccessfully.side_effect=RuntimeError('Unimplemented service')
+        library=Mock();library.SilverApi.return_value=api
+        with patch.object(Worker,'grpc_api',library,create=True),patch.object(Worker,'grpc',Mock(),create=True),patch.object(Worker,'existing_ports',return_value=[21845]),patch.object(Worker,'target',None),patch.object(Worker,'remote',Mock()) as remote:
+            with unittest.TestCase().assertRaisesRegex(RuntimeError,'ohne aktivierte Remote-API'):
+                Worker.connect({'path':'selected.sil','existing':[{'pid':123,'api_expected':False}]})
+            api.channel.close.assert_called_once();assert Worker.target is None
+            remote.RemoteSilver.assert_not_called()
+
+    @classmethod
+    def test_reused_pid_is_rejected_before_reading_ports(cls):
+        process=Mock();process.create_time.return_value=200
+        with patch('psutil.Process',return_value=process):
+            with unittest.TestCase().assertRaisesRegex(RuntimeError,'ersetzt'):
+                Worker.existing_ports({'pid':123,'created':100})
+            process.net_connections.assert_not_called()
+
+    @classmethod
+    def test_api_start_retry_is_bounded(cls):
+        with patch.object(Worker,'existing_ports',return_value=[]),patch('source.silver.connection_worker.time.monotonic',side_effect=[0,31]),patch.object(Worker,'remote',Mock()) as remote:
+            with unittest.TestCase().assertRaisesRegex(RuntimeError,'erneuter Prüfung'):
+                Worker.connect({'path':'selected.sil','existing':[{'pid':123,'api_expected':True}]})
+            remote.RemoteSilver.assert_not_called()
